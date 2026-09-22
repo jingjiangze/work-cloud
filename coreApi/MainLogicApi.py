@@ -71,6 +71,7 @@ class ApiClient:
         headers: Dict[str, str],
         data: Dict[str, Any],
         submit: bool = False,
+        allow_302: bool = False,
     ) -> Dict[str, Any]:
         """
         发送POST请求，并处理请求过程中可能发生的错误。
@@ -93,8 +94,10 @@ class ApiClient:
                 msg = rsp.get("msg", "未知错误")
 
                 # 特殊情况处理
+                # L4 修正：allow_302=True 时把 302（行为验证码）正常返回给
+                # 提交方处理 —— 否则 submit_clock_in 的验证码分支是死代码
                 if code == 200:
-                    if msg == "302":
+                    if msg == "302" and not allow_302:
                         raise ValueError("打卡失败，触发行为验证码")
                     return rsp
                 
@@ -448,12 +451,12 @@ class ApiClient:
 
         headers = self._get_authenticated_headers(sign_data)
 
-        response = self._post_request(url, headers, data, submit=True)
+        response = self._post_request(url, headers, data, submit=True, allow_302=True)
         if response.get("msg") == "302":
             logger.info("检测到行为验证码，正在通过···")
             data["captcha"] = self.solve_click_word_captcha()
             # RISK-C02 修复：二次提交必须校验结果，避免"假成功"
-            retry_response = self._post_request(url, headers, data, submit=True)
+            retry_response = self._post_request(url, headers, data, submit=True, allow_302=True)
             if retry_response.get("msg") == "302":
                 # L4: 二次提交仍要求验证码 → 处理超限，熔断
                 raise CaptchaExhaustedError("验证码校验未通过（二次提交仍要求验证码），打卡未提交")
