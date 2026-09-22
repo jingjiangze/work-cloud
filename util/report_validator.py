@@ -8,7 +8,8 @@
 历史记录布局（reports/ 已 gitignore）：
     reports/history/{user_key}/{report_type}.json
     结构: {"records": [{"date": "...", "hash": "...", "preview": "..."}]}
-    仅保留最近 N 条（HISTORY_KEEP），不保存全文，降低敏感信息落盘面。
+    每条仅存指纹与归一化文本（去标点/空白，截断至 COMPARE_CHARS），
+    不保存原始全文；保留最近 N 条（HISTORY_KEEP）。
 
 重复判定：
     归一化文本（去空白/标点、小写）后：
@@ -125,7 +126,7 @@ def check_duplicate(user_key: str, report_type: str, content: str,
             return True, record.get("date")
     for record in records[-5:]:
         old = record.get("preview_normalized")
-        if old and difflib.SequenceMatcher(None, normalized, old).ratio() >= DUPLICATE_RATIO:
+        if old and difflib.SequenceMatcher(None, normalized, old, autojunk=False).ratio() >= DUPLICATE_RATIO:
             return True, record.get("date")
     return False, None
 
