@@ -24,6 +24,14 @@ from util.report_validator import (
 from coreApi.auth_checker import ensure_login
 from models.execution_history import append_entry
 from util.preflight import run_preflight
+from models.risk_ledger import (
+    record_event,
+    EVENT_CAPTCHA_CIRCUIT_BREAK,
+    EVENT_DUPLICATE_PREVENTED,
+    EVENT_AUTH_FAILURE,
+    EVENT_SECOND_INSTANCE_BLOCKED,
+    EVENT_SUBMIT_UNKNOWN,
+)
 from models.task_state import (
     TaskStateStore,
     derive_user_key,
@@ -65,7 +73,8 @@ logger = logging.getLogger(__name__)
 USER_DIR = os.path.join(os.path.dirname(__file__), "user")
 
 
-def _resolve_submit(submit_fn, verify_fn, task_label: str):
+def _resolve_submit(submit_fn, verify_fn, task_label: str,
+                    user_key: str = "unknown"):
     """L3: 提交 → (明确成功/UNKNOWN) → 只读核验 → 最多一次补偿。
 
     规则：
@@ -80,17 +89,25 @@ def _resolve_submit(submit_fn, verify_fn, task_label: str):
         submit_fn()
     except SubmitUnknownError as e:
         logger.error(f"{task_label}提交结果未知，进行只读核验: {e}")
+        record_event(user_key, task_label, EVENT_SUBMIT_UNKNOWN,
+                     stage="submit", action="只读核验", result=str(e))
         try:
             exists = verify_fn()
         except Exception as ve:  # noqa: BLE001
             return "unknown", f"{task_label}提交结果未知且核验失败: {ve}"
         if exists:
             logger.warning(f"{task_label}服务端已存在记录，判定成功")
+            record_event(user_key, task_label, EVENT_SUBMIT_UNKNOWN,
+                         stage="verify", action="判定成功", result="服务端已存在记录")
             return "success", f"{task_label}提交结果未知但服务端已存在记录，判定成功"
         logger.warning(f"{task_label}服务端无记录，执行最多一次补偿提交")
+        record_event(user_key, task_label, EVENT_SUBMIT_UNKNOWN,
+                     stage="verify", action="补偿提交(最多一次)", result="服务端无记录")
         try:
             submit_fn()
         except SubmitUnknownError as e2:
+            record_event(user_key, task_label, EVENT_SUBMIT_UNKNOWN,
+                         stage="compensate", action="停止(不循环)", result=str(e2))
             return "unknown", f"{task_label}补偿提交结果仍未知，按规则停止: {e2}"
         except Exception as e2:  # noqa: BLE001
             return "fail", f"{task_label}补偿提交失败: {e2}"
@@ -208,6 +225,9 @@ def perform_clock_in(
                 )
                 if last_checkin_time.date() == current_time.date():
                     logger.info(f"今日 {display_type} 卡已打，无需重复打卡")
+                    record_event(user_key, "打卡", EVENT_DUPLICATE_PREVENTED,
+                                 stage="pre-submit", action="跳过重复提交",
+                                 result=f"今日{display_type}卡已打")
                     return {
                         "status": "skip",
                         "message": f"今日 {display_type} 卡已打，无需重复打卡",
@@ -243,6 +263,7 @@ def perform_clock_in(
             lambda: api_client.server_has_checkin(
                 checkin_type, current_time.date().isoformat()),
             f"{display_type}打卡",
+            user_key=user_key,
         )
 
         if status == "success":
@@ -276,6 +297,8 @@ def perform_clock_in(
     except CaptchaExhaustedError as e:
         # L4: 验证码熔断 —— 停止当前任务，阻断本用户后续任务
         logger.error(f"[CAPTCHA_EXHAUSTED] 打卡因验证码熔断失败: {e}")
+        record_event(user_key, "打卡", EVENT_CAPTCHA_CIRCUIT_BREAK,
+                     stage="submit", action="熔断停止", result=str(e))
         if state_store:
             state_store.mark(user_key, task_name, STATE_FAILED, f"验证码熔断: {e}")
         return {"status": "fail", "message": f"验证码熔断: {str(e)}",
@@ -283,6 +306,8 @@ def perform_clock_in(
     except SubmitUnknownError as e:
         # L2: 提交结果未知 —— 不判成功也不判失败，等待 L3 只读核验/下次运行核验
         logger.error(f"打卡提交结果未知: {e}")
+        record_event(user_key, "打卡", EVENT_SUBMIT_UNKNOWN,
+                     stage="submit", action="标记UNKNOWN", result=str(e))
         if state_store:
             state_store.mark(user_key, task_name, STATE_UNKNOWN, str(e))
         return {"status": "unknown",
@@ -395,6 +420,9 @@ def _submit_report_common(
 
             if should_skip:
                 logger.info(f"本周期已经提交过{task_name}，跳过")
+                record_event(user_key, state_task, EVENT_DUPLICATE_PREVENTED,
+                             stage="pre-submit", action="跳过重复提交",
+                             result=f"本周期已提交过{task_name}")
                 if state_store:
                     state_store.mark(user_key, state_task, "SKIPPED", f"本周期已经提交过{task_name}")
                 return {
@@ -471,6 +499,7 @@ def _submit_report_common(
             lambda: _report_exists_on_server(
                 api_client, report_type, current_time, count),
             title,
+            user_key=user_key,
         )
 
         if status == "success":
@@ -508,6 +537,8 @@ def _submit_report_common(
     except CaptchaExhaustedError as e:
         # L4: 验证码熔断
         logger.error(f"[CAPTCHA_EXHAUSTED] {task_name}因验证码熔断失败: {e}")
+        record_event(user_key, state_task, EVENT_CAPTCHA_CIRCUIT_BREAK,
+                     stage="submit", action="熔断停止", result=str(e))
         if state_store:
             state_store.mark(user_key, state_task, STATE_FAILED, f"验证码熔断: {e}")
         return {"status": "fail", "message": f"验证码熔断: {str(e)}",
@@ -515,6 +546,8 @@ def _submit_report_common(
     except SubmitUnknownError as e:
         # L2: 提交结果未知 —— 不判成功也不判失败
         logger.error(f"{task_name}提交结果未知: {e}")
+        record_event(user_key, state_task, EVENT_SUBMIT_UNKNOWN,
+                     stage="submit", action="标记UNKNOWN", result=str(e))
         if state_store:
             state_store.mark(user_key, state_task, STATE_UNKNOWN, str(e))
         return {"status": "unknown",
@@ -660,6 +693,7 @@ def run(config: ConfigManager) -> List[Dict[str, Any]]:
             return results
 
         api_client = ApiClient(config)
+        api_client.user_key = user_key  # L6: 风险事件台账归属用户
         # Stage 3: 登录检查层——会话预检 + 失败分类（密码/验证码/超时/网络/服务端）
         login_ok, _category, login_message = ensure_login(api_client)
         if state_store:
@@ -669,6 +703,8 @@ def run(config: ConfigManager) -> List[Dict[str, Any]]:
                 login_message,
             )
         if not login_ok:
+            record_event(user_key, "login", EVENT_AUTH_FAILURE,
+                         stage="login", action="终止本轮", result=_category or login_message)
             raise RuntimeError(login_message)
 
         logger.info("获取用户信息成功")
@@ -807,6 +843,9 @@ def execute_tasks(selected_files: Optional[List[str]] = None):
     run_lock = LocalRunLock(default_lock_path())
     if not run_lock.acquire():
         logger.error("检测到另一个 work-cloud 进程正在运行，本次运行退出（单实例锁）")
+        record_event("process", "全局", EVENT_SECOND_INSTANCE_BLOCKED,
+                     stage="startup", action="立即退出",
+                     result="另一进程持有运行锁")
         return
     try:
         _execute_tasks_impl(selected_files)

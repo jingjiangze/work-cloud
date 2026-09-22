@@ -13,6 +13,11 @@ from util.CryptoUtils import create_sign, aes_encrypt, aes_decrypt
 from util.CaptchaUtils import recognize_blockPuzzle_captcha, recognize_clickWord_captcha
 from util.HelperFunctions import get_current_month_info
 from util.request_helper import is_retryable_exception
+from models.risk_ledger import (
+    record_event,
+    EVENT_CAPTCHA_REQUIRED,
+    EVENT_NETWORK_RETRY,
+)
 
 # 尝试导入主模块的日志上下文，失败则创建本地版本
 try:
@@ -97,8 +102,15 @@ class ApiClient:
                 # L4 修正：allow_302=True 时把 302（行为验证码）正常返回给
                 # 提交方处理 —— 否则 submit_clock_in 的验证码分支是死代码
                 if code == 200:
-                    if msg == "302" and not allow_302:
-                        raise ValueError("打卡失败，触发行为验证码")
+                    if msg == "302":
+                        # L6: 行为验证码出现属于风险事件，记录台账
+                        record_event(
+                            getattr(self, "user_key", "unknown"), "request",
+                            EVENT_CAPTCHA_REQUIRED, stage=f"attempt {attempt + 1}",
+                            action="allow_302" if allow_302 else "raise",
+                            result="服务端要求行为验证码")
+                        if not allow_302:
+                            raise ValueError("打卡失败，触发行为验证码")
                     return rsp
                 
                 if code == 6111:
@@ -157,6 +169,10 @@ class ApiClient:
 
                 wait_time = 1 * (2 ** attempt)
                 logger.warning(f"请求失败: {e}，重试 {attempt + 1}/{self.max_retries}，等待 {wait_time:.2f} 秒")
+                record_event(
+                    getattr(self, "user_key", "unknown"), "request",
+                    EVENT_NETWORK_RETRY, stage=f"attempt {attempt + 1}/{self.max_retries}",
+                    action=f"退避{wait_time:.1f}s", result=str(e))
                 time.sleep(wait_time)
         
         raise ValueError("请求失败，超过最大重试次数")
