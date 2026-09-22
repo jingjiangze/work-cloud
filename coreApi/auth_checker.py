@@ -70,6 +70,9 @@ def classify_login_error(exc: Exception) -> str:
     # 超时/网络关键词（_post_request 会把异常文本重新包装，需兜底文本判断）
     if "timeout" in msg_lower or "timed out" in msg_lower:
         return LOGIN_TIMEOUT
+    if "超过最大重试" in msg or "请求失败" in msg:
+        # _post_request 重试耗尽的通用包装，重试仅针对网络类错误
+        return LOGIN_NETWORK_ERROR
     if any(k in msg_lower for k in ("connection", "ssl", "dns", "max retries", "network", "代理", "网络")):
         return LOGIN_NETWORK_ERROR
 
