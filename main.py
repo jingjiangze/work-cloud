@@ -22,6 +22,7 @@ from util.report_validator import (
     DEFAULT_MIN_LENGTH,
 )
 from coreApi.auth_checker import ensure_login
+from models.execution_history import append_entry
 from models.task_state import (
     TaskStateStore,
     derive_user_key,
@@ -481,8 +482,8 @@ def submit_monthly_report(
     )
 
 
-def run(config: ConfigManager) -> None:
-    """执行所有任务"""
+def run(config: ConfigManager) -> List[Dict[str, Any]]:
+    """执行所有任务（返回结果列表供执行历史记录）"""
     # 设置日志上下文标签
     try:
         file_part = "ENV"
@@ -497,6 +498,9 @@ def run(config: ConfigManager) -> None:
 
     results: List[Dict[str, Any]] = []
     pusher = None
+    started_at = datetime.now().strftime("%H:%M:%S")
+    start_dt = datetime.now()
+    user_key = "unknown"
 
     try:
         pusher = MessagePusher(config.get_value("config.pushNotifications"))
@@ -536,7 +540,7 @@ def run(config: ConfigManager) -> None:
 
     except Exception as e:
         error_message = f"执行任务时发生严重错误: {str(e)}"
-        logger.error(error_message)
+        logger.exception(error_message)  # Stage 8/9: 完整堆栈进文件日志
         results.append(
             {"status": "fail", "message": error_message, "task_type": "系统错误"}
         )
@@ -551,6 +555,10 @@ def run(config: ConfigManager) -> None:
             f"执行结束：{desensitize_name(config.get_value('userInfo.nikeName'))}"
         )
         _log_ctx.tag = "-"
+        # Stage 10: 每日执行历史台账
+        append_entry(user_key, results, started_at,
+                     (datetime.now() - start_dt).total_seconds())
+        return results
 
 
 def execute_tasks(selected_files: Optional[List[str]] = None):
@@ -618,7 +626,7 @@ def execute_tasks(selected_files: Optional[List[str]] = None):
             try:
                 future.result()
             except Exception as e:
-                logger.error(f"任务处理过程中发生错误: {e}")
+                logger.exception(f"任务处理过程中发生错误: {e}")
 
     logger.info("工学云任务执行结束")
 

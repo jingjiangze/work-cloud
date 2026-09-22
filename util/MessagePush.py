@@ -34,16 +34,16 @@ class MessagePusher:
         """
         self.push_config = push_config
 
-    def push(self, results: List[Dict[str, Any]]) -> None:
-        """
-        推送消息。
+    def push(self, results: List[Dict[str, Any]], level: str = None) -> None:
+        """推送消息（Stage 9: 通知分级 INFO/WARNING/ERROR）。
 
         Args:
-            results (List[Dict[str, Any]]): 任务执行结果列表。
-
-        Returns:
-            bool: 是否推送成功。
+            results: 任务执行结果列表。
+            level: 指定等级；None 时自动判定——
+                   全部成功 -> INFO；任一失败 -> ERROR；其余（含全跳过）-> WARNING。
         """
+        if not results:
+            return
         skip_count = sum(1 for result in results
                          if result.get("status") == "skip")
         if skip_count == len(results):
@@ -51,9 +51,11 @@ class MessagePusher:
             return
 
         success_count = sum(r.get("status") == "success" for r in results)
+        fail_count = sum(r.get("status") == "fail" for r in results)
+        if level is None:
+            level = "INFO" if fail_count == 0 and success_count == len(results)                 else ("ERROR" if fail_count else "WARNING")
         status_emoji = "🎉" if success_count == len(results) else "📊"
-        title = f"{status_emoji} 工学云报告 ({success_count}/{len(results)})"
-
+        title = f"{status_emoji} [{level}] 工学云报告 ({success_count}/{len(results)})"
         for service_config in self.push_config:
             if service_config.get("enabled", False):
                 service_type = service_config["type"]
