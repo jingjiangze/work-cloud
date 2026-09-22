@@ -23,6 +23,7 @@ from util.report_validator import (
 )
 from coreApi.auth_checker import ensure_login
 from models.execution_history import append_entry
+from util.preflight import run_preflight
 from models.task_state import (
     TaskStateStore,
     derive_user_key,
@@ -637,9 +638,28 @@ def run(config: ConfigManager) -> List[Dict[str, Any]]:
     try:
         pusher = MessagePusher(config.get_value("config.pushNotifications"))
 
-        api_client = ApiClient(config)
         state_store = TaskStateStore()
         user_key = derive_user_key(config)
+
+        # L5: 启动前只读预检（0 次业务请求 + 至多 1 次 TCP 探测），
+        # 关键条件不满足直接 STOP，不带着必败状态发起登录/提交
+        report = run_preflight(config, state_store, user_key)
+        if report.should_stop:
+            if report.benign:
+                results.append({
+                    "status": "skip",
+                    "message": f"预检跳过: {report.summary()}",
+                    "task_type": "预检",
+                })
+            else:
+                results.append({
+                    "status": "fail",
+                    "message": f"预检未通过: {report.summary()}",
+                    "task_type": "预检",
+                })
+            return results
+
+        api_client = ApiClient(config)
         # Stage 3: 登录检查层——会话预检 + 失败分类（密码/验证码/超时/网络/服务端）
         login_ok, _category, login_message = ensure_login(api_client)
         if state_store:
