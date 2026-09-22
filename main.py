@@ -64,6 +64,72 @@ logger = logging.getLogger(__name__)
 USER_DIR = os.path.join(os.path.dirname(__file__), "user")
 
 
+def _resolve_submit(submit_fn, verify_fn, task_label: str):
+    """L3: 提交 → (明确成功/UNKNOWN) → 只读核验 → 最多一次补偿。
+
+    规则：
+    - UNKNOWN 不自动转换为成功或失败，用只读查询收敛；
+    - 补偿提交最多一次；补偿结果仍为 UNKNOWN 时直接停止（不循环）；
+    - 明确成功后的只读核验仅作审计（advisory），不改变成功判定。
+
+    Returns:
+        (status, message): status ∈ {"success", "unknown", "fail"}
+    """
+    try:
+        submit_fn()
+    except SubmitUnknownError as e:
+        logger.error(f"{task_label}提交结果未知，进行只读核验: {e}")
+        try:
+            exists = verify_fn()
+        except Exception as ve:  # noqa: BLE001
+            return "unknown", f"{task_label}提交结果未知且核验失败: {ve}"
+        if exists:
+            logger.warning(f"{task_label}服务端已存在记录，判定成功")
+            return "success", f"{task_label}提交结果未知但服务端已存在记录，判定成功"
+        logger.warning(f"{task_label}服务端无记录，执行最多一次补偿提交")
+        try:
+            submit_fn()
+        except SubmitUnknownError as e2:
+            return "unknown", f"{task_label}补偿提交结果仍未知，按规则停止: {e2}"
+        except Exception as e2:  # noqa: BLE001
+            return "fail", f"{task_label}补偿提交失败: {e2}"
+        logger.info(f"{task_label}补偿提交成功")
+        return "success", f"{task_label}补偿提交成功"
+    except Exception as e:  # noqa: BLE001
+        return "fail", f"{task_label}提交失败: {e}"
+    # 明确成功 → 只读核验（advisory，不改变判定）
+    try:
+        if not verify_fn():
+            logger.warning(f"{task_label}提交响应成功但服务端暂未查到记录，以提交响应为准")
+    except Exception as ve:  # noqa: BLE001
+        logger.warning(f"{task_label}只读核验失败（不影响成功判定）: {ve}")
+    return "success", f"{task_label}提交成功"
+
+
+def _report_exists_on_server(api_client: ApiClient, report_type: str,
+                             current_time: datetime, count: int) -> bool:
+    """L3: 只读核验服务端本周期是否已有报告（与去重判定同一口径）。"""
+    info = api_client.get_submitted_reports_info(report_type)
+    reports = info.get("data") or []
+    if not reports:
+        return False
+    last = reports[0]
+    if report_type == "day":
+        ct = last.get("createTime")
+        if not ct:
+            return False
+        try:
+            return datetime.strptime(
+                ct, "%Y-%m-%d %H:%M:%S").date() == current_time.date()
+        except ValueError:
+            return False
+    if report_type == "week":
+        return last.get("weeks") == f"第{count}周"
+    if report_type == "month":
+        return last.get("yearmonth") == current_time.strftime("%Y-%m")
+    return False
+
+
 def perform_clock_in(
     api_client: ApiClient,
     config: ConfigManager,
@@ -170,26 +236,42 @@ def perform_clock_in(
             "description": description,
         }
 
-        api_client.submit_clock_in(checkin_info)
-        logger.info(f"用户 {user_name} {display_type} 打卡成功")
+        # L3: 提交 → (明确成功/UNKNOWN) → 只读核验 → 最多一次补偿
+        status, submit_message = _resolve_submit(
+            lambda: api_client.submit_clock_in(checkin_info),
+            lambda: api_client.server_has_checkin(
+                checkin_type, current_time.date().isoformat()),
+            f"{display_type}打卡",
+        )
 
+        if status == "success":
+            logger.info(f"用户 {user_name} {display_type} 打卡成功")
+            if state_store:
+                state_store.mark(
+                    user_key, task_name, success_state_for(task_name),
+                    submit_message,
+                )
+            return {
+                "status": "success",
+                "message": f"{display_type}打卡成功",
+                "task_type": "打卡",
+                "details": {
+                    "姓名": config.get_value("userInfo.nikeName"),
+                    "打卡类型": display_type,
+                    "打卡时间": current_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "打卡地点": config.get_value("config.clockIn.location.address"),
+                },
+            }
+        if status == "unknown":
+            logger.error(f"打卡最终状态未知: {submit_message}")
+            if state_store:
+                state_store.mark(user_key, task_name, STATE_UNKNOWN, submit_message)
+            return {"status": "unknown", "message": submit_message,
+                    "task_type": "打卡"}
+        logger.error(f"打卡失败: {submit_message}")
         if state_store:
-            state_store.mark(
-                user_key, task_name, success_state_for(task_name),
-                f"{display_type}打卡成功",
-            )
-
-        return {
-            "status": "success",
-            "message": f"{display_type}打卡成功",
-            "task_type": "打卡",
-            "details": {
-                "姓名": config.get_value("userInfo.nikeName"),
-                "打卡类型": display_type,
-                "打卡时间": current_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "打卡地点": config.get_value("config.clockIn.location.address"),
-            },
-        }
+            state_store.mark(user_key, task_name, STATE_FAILED, submit_message)
+        return {"status": "fail", "message": submit_message, "task_type": "打卡"}
     except SubmitUnknownError as e:
         # L2: 提交结果未知 —— 不判成功也不判失败，等待 L3 只读核验/下次运行核验
         logger.error(f"打卡提交结果未知: {e}")
@@ -375,25 +457,44 @@ def _submit_report_common(
             report_info["yearmonth"] = current_time.strftime("%Y-%m")
             extra_details = {"提交月份": report_info["yearmonth"]}
 
-        api_client.submit_report(report_info)
+        # L3: 提交 → (明确成功/UNKNOWN) → 只读核验 → 最多一次补偿
+        status, submit_message = _resolve_submit(
+            lambda: api_client.submit_report(report_info),
+            lambda: _report_exists_on_server(
+                api_client, report_type, current_time, count),
+            title,
+        )
 
-        logger.info(f"{title}已提交")
-
+        if status == "success":
+            logger.info(f"{title}已提交")
+            if state_store:
+                state_store.mark(user_key, state_task, success_state_for(state_task), submit_message)
+            record_report(user_key, state_task, content)
+            return {
+                "status": "success",
+                "message": f"{title}已提交",
+                "task_type": task_name,
+                "details": {
+                    "标题": title,
+                    "提交时间": current_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "附件": attachments,
+                    **extra_details,
+                },
+                "report_content": content,
+            }
+        if status == "unknown":
+            logger.error(f"{title}最终状态未知: {submit_message}")
+            if state_store:
+                state_store.mark(user_key, state_task, STATE_UNKNOWN, submit_message)
+            return {"status": "unknown", "message": submit_message,
+                    "task_type": task_name}
+        logger.error(f"{title}提交失败: {submit_message}")
         if state_store:
-            state_store.mark(user_key, state_task, success_state_for(state_task), f"{title}已提交")
-        record_report(user_key, state_task, content)
-
+            state_store.mark(user_key, state_task, STATE_FAILED, submit_message)
         return {
-            "status": "success",
-            "message": f"{title}已提交",
+            "status": "fail",
+            "message": submit_message,
             "task_type": task_name,
-            "details": {
-                "标题": title,
-                "提交时间": current_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "附件": attachments,
-                **extra_details,
-            },
-            "report_content": content,
         }
 
     except SubmitUnknownError as e:

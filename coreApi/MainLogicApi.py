@@ -454,6 +454,23 @@ class ApiClient:
         rsp = self._post_request(url, headers, data)
         return rsp.get("data", "")
 
+    def server_has_checkin(self, checkin_type: str, today_str: str) -> bool:
+        """只读核验：服务端当日是否已存在指定类型的打卡记录（L3）。
+
+        不产生任何写操作；查询失败由调用方处理。
+        """
+        info = self.get_checkin_info()
+        if not info or info.get("type") != checkin_type:
+            return False
+        create = info.get("createTime")
+        if not create:
+            return False
+        try:
+            from datetime import datetime as _dt
+            return _dt.strptime(create, "%Y-%m-%d %H:%M:%S").date().isoformat() == today_str
+        except ValueError:
+            return False
+
     def _get_authenticated_headers(
         self,
         sign_data: Optional[List[Optional[str]]] = None
