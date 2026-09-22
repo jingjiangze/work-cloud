@@ -41,3 +41,8 @@ cython_debug/
 # 用户配置（含凭据，禁止入库）；样例文件除外
 user/*
 !user/example.json
+
+# 运行时产物（状态/日志/报告历史）
+data/
+logs/
+reports/

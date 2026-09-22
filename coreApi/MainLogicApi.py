@@ -408,7 +408,10 @@ class ApiClient:
         if response.get("msg") == "302":
             logger.info("检测到行为验证码，正在通过···")
             data["captcha"] = self.solve_click_word_captcha()
-            self._post_request(url, headers, data)
+            # RISK-C02 修复：二次提交必须校验结果，避免"假成功"
+            retry_response = self._post_request(url, headers, data)
+            if retry_response.get("msg") == "302":
+                raise ValueError("验证码验证未通过，打卡未提交成功")
 
     def get_upload_token(self) -> str:
         """获取上传文件的认证令牌"""

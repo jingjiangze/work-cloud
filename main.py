@@ -14,6 +14,14 @@ from util.Config import ConfigManager
 from util.MessagePush import MessagePusher
 from util.HelperFunctions import desensitize_name, is_holiday
 from util.FileUploader import upload_img
+from models.task_state import (
+    TaskStateStore,
+    derive_user_key,
+    running_state_for,
+    success_state_for,
+    STATE_FAILED,
+    STATE_LOGIN_SUCCESS,
+)
 
 # 日志上下文支持
 _log_ctx = threading.local()
@@ -44,8 +52,14 @@ logger = logging.getLogger(__name__)
 USER_DIR = os.path.join(os.path.dirname(__file__), "user")
 
 
-def perform_clock_in(api_client: ApiClient, config: ConfigManager) -> Dict[str, Any]:
+def perform_clock_in(
+    api_client: ApiClient,
+    config: ConfigManager,
+    state_store: Optional[TaskStateStore] = None,
+    user_key: str = "unknown",
+) -> Dict[str, Any]:
     """执行打卡操作"""
+    task_name = "checkin"
     try:
         current_time = datetime.now()
         current_hour = current_time.hour
@@ -85,11 +99,16 @@ def perform_clock_in(api_client: ApiClient, config: ConfigManager) -> Dict[str, 
                     display_type = "休息/节假日"
 
         if should_skip:
+            if state_store:
+                state_store.mark(user_key, task_name, "SKIPPED", skip_message)
             return {
                 "status": "skip",
                 "message": skip_message,
                 "task_type": "打卡",
             }
+
+        if state_store:
+            state_store.mark(user_key, task_name, running_state_for(task_name))
 
         last_checkin_info = api_client.get_checkin_info()
 
@@ -133,6 +152,12 @@ def perform_clock_in(api_client: ApiClient, config: ConfigManager) -> Dict[str, 
         api_client.submit_clock_in(checkin_info)
         logger.info(f"用户 {user_name} {display_type} 打卡成功")
 
+        if state_store:
+            state_store.mark(
+                user_key, task_name, success_state_for(task_name),
+                f"{display_type}打卡成功",
+            )
+
         return {
             "status": "success",
             "message": f"{display_type}打卡成功",
@@ -146,6 +171,8 @@ def perform_clock_in(api_client: ApiClient, config: ConfigManager) -> Dict[str, 
         }
     except Exception as e:
         logger.error(f"打卡失败: {e}")
+        if state_store:
+            state_store.mark(user_key, task_name, STATE_FAILED, str(e))
         return {"status": "fail", "message": f"打卡失败: {str(e)}", "task_type": "打卡"}
 
 
@@ -160,15 +187,25 @@ def _submit_report_common(
     image_count_key: str,
     task_name: str,
     form_type: int,
+    state_store: Optional[TaskStateStore] = None,
+    user_key: str = "unknown",
 ) -> Dict[str, Any]:
     """通用日报/周报/月报提交逻辑"""
 
-    # 映射 report_type 到 config key
+    # 映射 report_type 到 config key 与本地状态任务名（Stage 1）
     config_key_map = {"day": "daily", "week": "weekly", "month": "monthly"}
+    state_task_map = {
+        "day": "daily_report",
+        "week": "weekly_report",
+        "month": "monthly_report",
+    }
     config_key = config_key_map.get(report_type)
+    state_task = state_task_map.get(report_type, report_type)
 
     if not config.get_value(f"config.reportSettings.{config_key}.enabled"):
         logger.info(f"用户未开启{task_name}功能，跳过")
+        if state_store:
+            state_store.mark(user_key, state_task, "SKIPPED", f"用户未开启{task_name}功能")
         return {
             "status": "skip",
             "message": f"用户未开启{task_name}功能",
@@ -180,6 +217,8 @@ def _submit_report_common(
     # 检查提交时间
     if not check_time_func(current_time):
         logger.info(f"未到{task_name}提交时间")
+        if state_store:
+            state_store.mark(user_key, state_task, "SKIPPED", f"未到{task_name}提交时间")
         return {
             "status": "skip",
             "message": f"未到{task_name}提交时间",
@@ -187,6 +226,9 @@ def _submit_report_common(
         }
 
     try:
+        if state_store:
+            state_store.mark(user_key, state_task, running_state_for(state_task))
+
         # 检查是否已提交
         submitted_reports_info = get_submitted_func()
         submitted_reports = submitted_reports_info.get("data", [])
@@ -225,6 +267,8 @@ def _submit_report_common(
 
             if should_skip:
                 logger.info(f"本周期已经提交过{task_name}，跳过")
+                if state_store:
+                    state_store.mark(user_key, state_task, "SKIPPED", f"本周期已经提交过{task_name}")
                 return {
                     "status": "skip",
                     "message": f"本周期已经提交过{task_name}",
@@ -277,6 +321,9 @@ def _submit_report_common(
 
         logger.info(f"{title}已提交")
 
+        if state_store:
+            state_store.mark(user_key, state_task, success_state_for(state_task), f"{title}已提交")
+
         return {
             "status": "success",
             "message": f"{title}已提交",
@@ -292,6 +339,8 @@ def _submit_report_common(
 
     except Exception as e:
         logger.error(f"{task_name}提交失败: {e}")
+        if state_store:
+            state_store.mark(user_key, state_task, STATE_FAILED, str(e))
         return {
             "status": "fail",
             "message": f"{task_name}提交失败: {str(e)}",
@@ -299,11 +348,18 @@ def _submit_report_common(
         }
 
 
-def submit_daily_report(api_client: ApiClient, config: ConfigManager) -> Dict[str, Any]:
+def submit_daily_report(
+    api_client: ApiClient,
+    config: ConfigManager,
+    state_store: Optional[TaskStateStore] = None,
+    user_key: str = "unknown",
+) -> Dict[str, Any]:
     """提交日报"""
     return _submit_report_common(
         api_client=api_client,
         config=config,
+        state_store=state_store,
+        user_key=user_key,
         report_type="day",
         title_func=lambda c: f"第{c}天日报",
         check_time_func=lambda t: t.hour >= 12,
@@ -316,7 +372,10 @@ def submit_daily_report(api_client: ApiClient, config: ConfigManager) -> Dict[st
 
 
 def submit_weekly_report(
-    config: ConfigManager, api_client: ApiClient
+    config: ConfigManager,
+    api_client: ApiClient,
+    state_store: Optional[TaskStateStore] = None,
+    user_key: str = "unknown",
 ) -> Dict[str, Any]:
     """提交周报"""
     submit_day = config.get_value("config.reportSettings.weekly.submitTime")
@@ -328,6 +387,8 @@ def submit_weekly_report(
     return _submit_report_common(
         api_client=api_client,
         config=config,
+        state_store=state_store,
+        user_key=user_key,
         report_type="week",
         title_func=lambda c: f"第{c}周周报",
         check_time_func=check_time,
@@ -340,7 +401,10 @@ def submit_weekly_report(
 
 
 def submit_monthly_report(
-    config: ConfigManager, api_client: ApiClient
+    config: ConfigManager,
+    api_client: ApiClient,
+    state_store: Optional[TaskStateStore] = None,
+    user_key: str = "unknown",
 ) -> Dict[str, Any]:
     """提交月报"""
     submit_day = config.get_value("config.reportSettings.monthly.submitTime")
@@ -355,6 +419,8 @@ def submit_monthly_report(
     return _submit_report_common(
         api_client=api_client,
         config=config,
+        state_store=state_store,
+        user_key=user_key,
         report_type="month",
         title_func=lambda c: f"第{c}月月报",
         check_time_func=check_time,
@@ -387,8 +453,12 @@ def run(config: ConfigManager) -> None:
         pusher = MessagePusher(config.get_value("config.pushNotifications"))
 
         api_client = ApiClient(config)
+        state_store = TaskStateStore()
+        user_key = derive_user_key(config)
         if not config.get_value("userInfo.token"):
             api_client.login()
+        if state_store:
+            state_store.mark(user_key, "login", STATE_LOGIN_SUCCESS)
 
         logger.info("获取用户信息成功")
 
@@ -403,10 +473,10 @@ def run(config: ConfigManager) -> None:
         )
 
         results = [
-            perform_clock_in(api_client, config),
-            submit_daily_report(api_client, config),
-            submit_weekly_report(config, api_client),
-            submit_monthly_report(config, api_client),
+            perform_clock_in(api_client, config, state_store, user_key),
+            submit_daily_report(api_client, config, state_store, user_key),
+            submit_weekly_report(config, api_client, state_store, user_key),
+            submit_monthly_report(config, api_client, state_store, user_key),
         ]
 
     except Exception as e:
