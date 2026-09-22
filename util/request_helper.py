@@ -95,12 +95,20 @@ def request_with_retry(
     last_exc: Exception = RuntimeError("request_with_retry: 未发起请求")
 
     for attempt in range(1, max(1, max_retry) + 1):
+        response = None
         try:
             response = sender.request(method, url, timeout=timeout, **kwargs)
             response.raise_for_status()
             return response
         except requests.RequestException as e:
             last_exc = e
+            # raise_for_status 抛出的 HTTPError 正常携带 response；
+            # 兜底补挂当前 response，保证状态码分类/重试判断准确
+            if response is not None and getattr(e, "response", None) is None:
+                try:
+                    e.response = response
+                except Exception:  # noqa: BLE001 - 属性只读等极端情况忽略
+                    pass
             category = classify_exception(e)
             if attempt >= max_retry or not is_retryable_exception(e):
                 logger.error(
