@@ -58,6 +58,7 @@ def aggregate(history_dir: str = HISTORY_DIR) -> Dict[str, Any]:
         "success_tasks": 0,
         "failed_tasks": 0,
         "skipped_tasks": 0,
+        "unknown_tasks": 0,
         "avg_duration_sec": 0.0,
         "days": 0,
         "date_range": [],
@@ -94,6 +95,7 @@ def aggregate(history_dir: str = HISTORY_DIR) -> Dict[str, Any]:
             stats["success_tasks"] += counts["success"]
             stats["failed_tasks"] += counts["fail"]
             stats["skipped_tasks"] += counts["skip"]
+            stats["unknown_tasks"] += counts.get("unknown", 0)
             try:
                 durations.append(float(entry.get("duration_sec", 0)))
             except (TypeError, ValueError):

@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Callable
 
-from coreApi.MainLogicApi import ApiClient
+from coreApi.MainLogicApi import ApiClient, SubmitUnknownError
 from coreApi.AiServiceClient import generate_article
 from util.Config import ConfigManager
 from util.MessagePush import MessagePusher
@@ -30,6 +30,7 @@ from models.task_state import (
     success_state_for,
     STATE_FAILED,
     STATE_LOGIN_SUCCESS,
+    STATE_UNKNOWN,
 )
 
 # 日志上下文支持
@@ -189,6 +190,14 @@ def perform_clock_in(
                 "打卡地点": config.get_value("config.clockIn.location.address"),
             },
         }
+    except SubmitUnknownError as e:
+        # L2: 提交结果未知 —— 不判成功也不判失败，等待 L3 只读核验/下次运行核验
+        logger.error(f"打卡提交结果未知: {e}")
+        if state_store:
+            state_store.mark(user_key, task_name, STATE_UNKNOWN, str(e))
+        return {"status": "unknown",
+                "message": f"打卡提交结果未知（待服务端核验）: {str(e)}",
+                "task_type": "打卡"}
     except Exception as e:
         logger.error(f"打卡失败: {e}")
         if state_store:
@@ -387,6 +396,14 @@ def _submit_report_common(
             "report_content": content,
         }
 
+    except SubmitUnknownError as e:
+        # L2: 提交结果未知 —— 不判成功也不判失败
+        logger.error(f"{task_name}提交结果未知: {e}")
+        if state_store:
+            state_store.mark(user_key, state_task, STATE_UNKNOWN, str(e))
+        return {"status": "unknown",
+                "message": f"{task_name}提交结果未知（待服务端核验）: {str(e)}",
+                "task_type": task_name}
     except Exception as e:
         logger.error(f"{task_name}提交失败: {e}")
         if state_store:

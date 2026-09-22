@@ -23,6 +23,15 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class SubmitUnknownError(Exception):
+    """提交类请求结果未知（L2）。
+
+    触发条件：提交类 POST 发出后未收到服务端响应（超时/连接重置/传输中断），
+    无法确定服务端是否已受理 —— 此时**不得**判定为 FAILED，也**不得**盲目重试。
+    由调用方进行只读核验（L3）后收敛为 SUCCESS / FAILED / UNKNOWN。
+    """
+
+
 class ApiClient:
     """
     ApiClient类用于与远程服务器进行交互，包括用户登录、获取实习计划、获取打卡信息、提交打卡等功能。
@@ -52,6 +61,7 @@ class ApiClient:
         url: str,
         headers: Dict[str, str],
         data: Dict[str, Any],
+        submit: bool = False,
     ) -> Dict[str, Any]:
         """
         发送POST请求，并处理请求过程中可能发生的错误。
@@ -311,7 +321,7 @@ class ApiClient:
             if key in report_info:
                 data[key] = report_info[key]
 
-        self._post_request(url, headers, data)
+        self._post_request(url, headers, data, submit=True)
 
     def get_weeks_date(self) -> List[Dict[str, Any]]:
         """获取本周周报周期信息"""
@@ -404,12 +414,12 @@ class ApiClient:
 
         headers = self._get_authenticated_headers(sign_data)
 
-        response = self._post_request(url, headers, data)
+        response = self._post_request(url, headers, data, submit=True)
         if response.get("msg") == "302":
             logger.info("检测到行为验证码，正在通过···")
             data["captcha"] = self.solve_click_word_captcha()
             # RISK-C02 修复：二次提交必须校验结果，避免"假成功"
-            retry_response = self._post_request(url, headers, data)
+            retry_response = self._post_request(url, headers, data, submit=True)
             if retry_response.get("msg") == "302":
                 raise ValueError("验证码验证未通过，打卡未提交成功")
 
