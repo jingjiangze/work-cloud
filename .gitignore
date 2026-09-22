@@ -38,4 +38,6 @@ coverage.xml
 # Cython debug symbols
 cython_debug/
 
-user/test.json
+# 用户配置（含凭据，禁止入库）；样例文件除外
+user/*
+!user/example.json
