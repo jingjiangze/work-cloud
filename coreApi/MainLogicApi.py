@@ -109,16 +109,39 @@ class ApiClient:
                 raise ValueError(msg)
 
             except (requests.RequestException, ValueError) as e:
-                # 如果是最后一次尝试，或者遇到无法重试的错误（如验证码），则抛出异常
-                is_last_attempt = attempt >= self.max_retries - 1
-                error_str = str(e)
-                
-                # 包含中文字符的错误通常是业务错误，或者已经达到最大重试次数
-                if re.search(r"[\u4e00-\u9fff]", error_str) and "Token失效" not in error_str:
-                     raise ValueError(error_str)
-                
-                if is_last_attempt:
-                    raise ValueError(error_str)
+                # raise_for_status 抛出的 HTTPError 兜底补挂 response，
+                # 保证状态码判断准确（正常 requests 会自动挂载）
+                if isinstance(e, requests.exceptions.HTTPError) \
+                        and getattr(e, "response", None) is None:
+                    try:
+                        e.response = response
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                # L2: 提交类请求结果无法确定 → UNKNOWN，不重试不判失败
+                #  - 未收到响应（超时/重置/中断）→ UNKNOWN
+                #  - 5xx（网关/后端是否受理未知）→ UNKNOWN
+                #  - 4xx：服务端明确拒绝 → 走下方业务失败路径
+                if submit and not isinstance(e, ValueError):
+                    code = getattr(getattr(e, "response", None), "status_code", None)
+                    if not isinstance(e, requests.exceptions.HTTPError):
+                        raise SubmitUnknownError(
+                            f"提交后未收到服务端响应: {e}") from e
+                    if code is not None and code >= 500:
+                        raise SubmitUnknownError(
+                            f"提交后服务端返回 {code}，受理状态未知: {e}") from e
+
+                # Stage 4: 精确重试分类（替代中文启发式，RISK-C04）
+                # - 业务错误(ValueError)不重试
+                # - 仅对"确定未到达服务端"的错误重试，缓解重复提交（RISK-B06）
+                if isinstance(e, ValueError):
+                    raise
+
+                if not is_retryable_exception(e):
+                    raise ValueError(str(e))
+
+                if attempt >= self.max_retries - 1:
+                    raise ValueError(str(e))
 
                 wait_time = 1 * (2 ** attempt)
                 logger.warning(f"请求失败: {e}，重试 {attempt + 1}/{self.max_retries}，等待 {wait_time:.2f} 秒")
