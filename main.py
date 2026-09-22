@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Callable
 
-from coreApi.MainLogicApi import ApiClient, SubmitUnknownError
+from coreApi.MainLogicApi import ApiClient, SubmitUnknownError, CaptchaExhaustedError
 from coreApi.AiServiceClient import generate_article
 from util.Config import ConfigManager
 from util.MessagePush import MessagePusher
@@ -272,6 +272,13 @@ def perform_clock_in(
         if state_store:
             state_store.mark(user_key, task_name, STATE_FAILED, submit_message)
         return {"status": "fail", "message": submit_message, "task_type": "打卡"}
+    except CaptchaExhaustedError as e:
+        # L4: 验证码熔断 —— 停止当前任务，阻断本用户后续任务
+        logger.error(f"[CAPTCHA_EXHAUSTED] 打卡因验证码熔断失败: {e}")
+        if state_store:
+            state_store.mark(user_key, task_name, STATE_FAILED, f"验证码熔断: {e}")
+        return {"status": "fail", "message": f"验证码熔断: {str(e)}",
+                "task_type": "打卡", "captcha_exhausted": True}
     except SubmitUnknownError as e:
         # L2: 提交结果未知 —— 不判成功也不判失败，等待 L3 只读核验/下次运行核验
         logger.error(f"打卡提交结果未知: {e}")
@@ -497,6 +504,13 @@ def _submit_report_common(
             "task_type": task_name,
         }
 
+    except CaptchaExhaustedError as e:
+        # L4: 验证码熔断
+        logger.error(f"[CAPTCHA_EXHAUSTED] {task_name}因验证码熔断失败: {e}")
+        if state_store:
+            state_store.mark(user_key, state_task, STATE_FAILED, f"验证码熔断: {e}")
+        return {"status": "fail", "message": f"验证码熔断: {str(e)}",
+                "task_type": task_name, "captcha_exhausted": True}
     except SubmitUnknownError as e:
         # L2: 提交结果未知 —— 不判成功也不判失败
         logger.error(f"{task_name}提交结果未知: {e}")
@@ -649,12 +663,30 @@ def run(config: ConfigManager) -> List[Dict[str, Any]]:
             f"开始执行：{desensitize_name(config.get_value('userInfo.nikeName'))}"
         )
 
-        results = [
-            perform_clock_in(api_client, config, state_store, user_key),
-            submit_daily_report(api_client, config, state_store, user_key),
-            submit_weekly_report(config, api_client, state_store, user_key),
-            submit_monthly_report(config, api_client, state_store, user_key),
+        # L4: 顺序执行；验证码熔断时立即阻断本用户剩余任务（失败保护）
+        task_funcs = [
+            ("打卡", lambda: perform_clock_in(api_client, config, state_store, user_key)),
+            ("日报提交", lambda: submit_daily_report(api_client, config, state_store, user_key)),
+            ("周报提交", lambda: submit_weekly_report(config, api_client, state_store, user_key)),
+            ("月报提交", lambda: submit_monthly_report(config, api_client, state_store, user_key)),
         ]
+        results = []
+        for idx, (label, fn) in enumerate(task_funcs):
+            result = fn()
+            results.append(result)
+            if result.get("captcha_exhausted"):
+                logger.error(f"[CAPTCHA_EXHAUSTED] {label}触发验证码熔断，"
+                             f"跳过本用户剩余 {len(task_funcs) - idx - 1} 个任务")
+                for remaining_label, _fn in task_funcs[idx + 1:]:
+                    results.append({
+                        "status": "skip",
+                        "message": "验证码熔断，已跳过",
+                        "task_type": remaining_label,
+                    })
+                    if state_store:
+                        state_store.mark(user_key, remaining_label, "SKIPPED",
+                                         "验证码熔断，已跳过")
+                break
 
     except Exception as e:
         error_message = f"执行任务时发生严重错误: {str(e)}"

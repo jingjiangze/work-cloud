@@ -23,6 +23,15 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class CaptchaExhaustedError(Exception):
+    """验证码处理超限（L4 熔断）。
+
+    验证码是异常事件而非普通重试场景：获取/识别失败达到上限后立即停止
+    当前任务并向上传播，由调用方决定是否阻断后续任务（失败保护，
+    而非自动突破）。
+    """
+
+
 class SubmitUnknownError(Exception):
     """提交类请求结果未知（L2）。
 
@@ -184,7 +193,8 @@ class ApiClient:
                 logger.warning(f"滑块验证尝试 {attempt + 1}/{max_attempts} 失败: {e}")
                 time.sleep(random.uniform(1, 3))
                 
-        raise Exception("通过滑块验证码失败")
+        raise CaptchaExhaustedError(
+            f"滑块验证码连续 {max_attempts} 次未通过，熔断停止")
 
     def solve_click_word_captcha(self, max_retries: int = 5) -> str:
         """通过点选验证码（clickWord）"""
@@ -232,7 +242,8 @@ class ApiClient:
                 logger.warning(f"点选验证尝试 {retry + 1}/{max_retries} 失败: {e}")
                 time.sleep(random.uniform(1, 3))
 
-        raise Exception("通过点选验证码失败")
+        raise CaptchaExhaustedError(
+            f"点选验证码连续 {max_retries} 次未通过，熔断停止")
 
     def login(self) -> None:
         """执行用户登录操作"""
@@ -444,7 +455,8 @@ class ApiClient:
             # RISK-C02 修复：二次提交必须校验结果，避免"假成功"
             retry_response = self._post_request(url, headers, data, submit=True)
             if retry_response.get("msg") == "302":
-                raise ValueError("验证码验证未通过，打卡未提交成功")
+                # L4: 二次提交仍要求验证码 → 处理超限，熔断
+                raise CaptchaExhaustedError("验证码校验未通过（二次提交仍要求验证码），打卡未提交")
 
     def get_upload_token(self) -> str:
         """获取上传文件的认证令牌"""
