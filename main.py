@@ -14,6 +14,7 @@ from util.Config import ConfigManager
 from util.MessagePush import MessagePusher
 from util.HelperFunctions import desensitize_name, is_holiday
 from util.FileUploader import upload_img
+from coreApi.auth_checker import ensure_login
 from models.task_state import (
     TaskStateStore,
     derive_user_key,
@@ -472,10 +473,16 @@ def run(config: ConfigManager) -> None:
         api_client = ApiClient(config)
         state_store = TaskStateStore()
         user_key = derive_user_key(config)
-        if not config.get_value("userInfo.token"):
-            api_client.login()
+        # Stage 3: 登录检查层——会话预检 + 失败分类（密码/验证码/超时/网络/服务端）
+        login_ok, _category, login_message = ensure_login(api_client)
         if state_store:
-            state_store.mark(user_key, "login", STATE_LOGIN_SUCCESS)
+            state_store.mark(
+                user_key, "login",
+                STATE_LOGIN_SUCCESS if login_ok else STATE_FAILED,
+                login_message,
+            )
+        if not login_ok:
+            raise RuntimeError(login_message)
 
         logger.info("获取用户信息成功")
 
