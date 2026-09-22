@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 import time
 import uuid
 import random
@@ -13,6 +12,7 @@ from util.Config import ConfigManager
 from util.CryptoUtils import create_sign, aes_encrypt, aes_decrypt
 from util.CaptchaUtils import recognize_blockPuzzle_captcha, recognize_clickWord_captcha
 from util.HelperFunctions import get_current_month_info
+from util.request_helper import is_retryable_exception
 
 # 尝试导入主模块的日志上下文，失败则创建本地版本
 try:

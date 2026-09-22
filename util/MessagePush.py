@@ -11,6 +11,8 @@ from email.utils import formataddr
 
 import requests
 
+from util.request_helper import post_with_retry
+
 # 尝试导入主模块的日志上下文，失败则创建本地版本
 try:
     from main import _log_ctx
@@ -92,7 +94,7 @@ class MessagePusher:
         url = f'https://sctapi.ftqq.com/{config["sendKey"]}.send'
         data = {"title": title, "desp": content}
 
-        rsp = requests.post(url, data=data).json()
+        rsp = post_with_retry(url, data=data).json()
         if rsp.get("code") == 0:
             logger.info("Server酱推送成功")
         else:
@@ -109,7 +111,7 @@ class MessagePusher:
         url = f'https://www.pushplus.plus/send/{config["token"]}'
         data = {"title": title, "content": content}
 
-        rsp = requests.post(url, data=data).json()
+        rsp = post_with_retry(url, data=data).json()
         if rsp.get("code") == 200:
             logger.info("PushPlus推送成功")
         else:
@@ -132,7 +134,7 @@ class MessagePusher:
             "to": config["to"],
         }
 
-        rsp = requests.post(url, data=data).json()
+        rsp = post_with_retry(url, data=data).json()
         if rsp.get("code") == 200:
             logger.info("AnPush推送成功")
         else:
@@ -155,7 +157,7 @@ class MessagePusher:
             "spt": config["spt"],
         }
 
-        rsp = requests.post(url, json=data).json()
+        rsp = post_with_retry(url, json=data).json()
         if rsp.get("code") == 1000:
             logger.info("WxPusher推送成功")
         else:
@@ -179,7 +181,7 @@ class MessagePusher:
         # 添加邮件内容
         msg.attach(MIMEText(content, "html", "utf-8"))
 
-        with smtplib.SMTP_SSL(config["host"], config["port"]) as server:
+        with smtplib.SMTP_SSL(config["host"], config["port"], timeout=15) as server:
             server.login(config["username"], config["password"])
             server.send_message(msg)
             logger.info(f"邮件已发送成功")
@@ -205,7 +207,7 @@ class MessagePusher:
         if "team" in config:
             data["team"] = config["team"]
 
-        rsp = requests.post(url, json=data).json()
+        rsp = post_with_retry(url, json=data).json()
         if rsp.get("status") == "queued":
             logger.info("NotifyX推送成功")
         else:
