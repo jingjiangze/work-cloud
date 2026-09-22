@@ -561,8 +561,8 @@ def run(config: ConfigManager) -> List[Dict[str, Any]]:
         return results
 
 
-def execute_tasks(selected_files: Optional[List[str]] = None):
-    """创建并执行任务"""
+def _execute_tasks_impl(selected_files: Optional[List[str]] = None):
+    """创建并执行任务（调用方需已持有单实例锁）"""
     _log_ctx.tag = "MAIN"
     logger.info("开始执行工学云任务")
 
@@ -629,6 +629,19 @@ def execute_tasks(selected_files: Optional[List[str]] = None):
                 logger.exception(f"任务处理过程中发生错误: {e}")
 
     logger.info("工学云任务执行结束")
+
+
+def execute_tasks(selected_files: Optional[List[str]] = None):
+    """单实例入口：同一台机器同时只允许一个 work-cloud 进程执行（L1）"""
+    from util.local_run_lock import LocalRunLock, default_lock_path
+    run_lock = LocalRunLock(default_lock_path())
+    if not run_lock.acquire():
+        logger.error("检测到另一个 work-cloud 进程正在运行，本次运行退出（单实例锁）")
+        return
+    try:
+        _execute_tasks_impl(selected_files)
+    finally:
+        run_lock.release()
 
 
 if __name__ == "__main__":
