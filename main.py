@@ -151,6 +151,7 @@ def perform_clock_in(
             config.get_value("userInfo.orgJson.snowFlakeId"),
             config.get_value("userInfo.userId"),
             config.get_value("config.clockIn.imageCount"),
+            user_key=user_key,
         )
 
         description_list = config.get_value("config.clockIn.description")
@@ -333,6 +334,7 @@ def _submit_report_common(
             config.get_value("userInfo.orgJson.snowFlakeId"),
             config.get_value("userInfo.userId"),
             config.get_value(image_count_key),
+            user_key=user_key,
         )
 
         report_info = {
