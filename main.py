@@ -60,6 +60,14 @@ def perform_clock_in(
 ) -> Dict[str, Any]:
     """执行打卡操作"""
     task_name = "checkin"
+    # Stage 2 幂等保护：本地状态显示当日已成功则直接跳过（服务端检查仍保留兜底）
+    if state_store and state_store.is_done(user_key, task_name):
+        logger.info("本地状态显示今日打卡已完成，跳过")
+        return {
+            "status": "skip",
+            "message": "今日打卡已完成（本地状态）",
+            "task_type": "打卡",
+        }
     try:
         current_time = datetime.now()
         current_hour = current_time.hour
@@ -201,6 +209,15 @@ def _submit_report_common(
     }
     config_key = config_key_map.get(report_type)
     state_task = state_task_map.get(report_type, report_type)
+
+    # Stage 2 幂等保护：本地状态显示本周期已成功提交则直接跳过
+    if state_store and state_store.is_done(user_key, state_task):
+        logger.info(f"本地状态显示本周期{task_name}已提交，跳过")
+        return {
+            "status": "skip",
+            "message": f"本周期{task_name}已提交（本地状态）",
+            "task_type": task_name,
+        }
 
     if not config.get_value(f"config.reportSettings.{config_key}.enabled"):
         logger.info(f"用户未开启{task_name}功能，跳过")
