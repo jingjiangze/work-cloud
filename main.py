@@ -14,6 +14,12 @@ from util.Config import ConfigManager
 from util.MessagePush import MessagePusher
 from util.HelperFunctions import desensitize_name, is_holiday
 from util.FileUploader import upload_img
+from util.report_validator import (
+    validate_report,
+    check_duplicate,
+    record_report,
+    DEFAULT_MIN_LENGTH,
+)
 from coreApi.auth_checker import ensure_login
 from models.task_state import (
     TaskStateStore,
@@ -302,6 +308,25 @@ def _submit_report_common(
             config.get_value(paper_num_key),
         )
 
+        # Stage 6: 内容校验 + 重复检测
+        min_len = max(DEFAULT_MIN_LENGTH, int(config.get_value(paper_num_key) or 0))
+        ok, issues = validate_report(content, min_length=min_len)
+        if not ok:
+            raise ValueError(f"报告内容校验未通过: {'；'.join(issues)}")
+        is_dup, ref_date = check_duplicate(user_key, state_task, content)
+        if is_dup:
+            logger.warning(f"{title}与 {ref_date} 的内容高度相似，重新生成一次")
+            content = generate_article(
+                config, title, job_info, config.get_value(paper_num_key))
+            ok2, issues2 = validate_report(content, min_length=min_len)
+            if not ok2:
+                raise ValueError(f"报告内容校验未通过: {'；'.join(issues2)}")
+            if check_duplicate(user_key, state_task, content)[0]:
+                content = (
+                    f"{content}\n报告日期：{current_time.strftime('%Y-%m-%d')}"
+                )
+                logger.warning("重新生成后仍相似，已附加报告日期区分内容")
+
         # 上传图片
         attachments = upload_img(
             api_client.get_upload_token(),
@@ -341,6 +366,7 @@ def _submit_report_common(
 
         if state_store:
             state_store.mark(user_key, state_task, success_state_for(state_task), f"{title}已提交")
+        record_report(user_key, state_task, content)
 
         return {
             "status": "success",
