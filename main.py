@@ -14,6 +14,7 @@ from util.Config import ConfigManager
 from util.MessagePush import MessagePusher
 from util.HelperFunctions import desensitize_name, is_holiday
 from util.FileUploader import upload_img
+from util.structured_logging import setup_file_logging
 from util.report_validator import (
     validate_report,
     check_duplicate,
@@ -53,6 +54,8 @@ if not _root_logger.handlers:
     handler.setFormatter(formatter)
     _root_logger.addHandler(handler)
     _root_logger.setLevel(logging.INFO)
+    # Stage 8: 结构化 JSON 文件日志（logs/YYYY/MM/DD/app.log），失败不影响主流程
+    setup_file_logging()
 
 logger = logging.getLogger(__name__)
 
