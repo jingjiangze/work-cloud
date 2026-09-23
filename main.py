@@ -73,6 +73,9 @@ if not _root_logger.handlers:
 logger = logging.getLogger(__name__)
 
 USER_DIR = os.path.join(os.path.dirname(__file__), "user")
+# Stage 3: 账户级运行数据根目录与注册表路径（显式传递，禁止内部隐式回退）
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+REGISTRY_PATH = os.path.join(DATA_DIR, "accounts", "index.json")
 
 
 def _resolve_submit(submit_fn, verify_fn, task_label: str,
@@ -853,7 +856,9 @@ def _execute_tasks_impl(selected_files: Optional[List[str]] = None):
     task_contexts: List[Optional[AccountContext]] = []
     for task in tasks:
         try:
-            task_contexts.append(AccountContext.from_config(task))
+            task_contexts.append(AccountContext.from_config(
+                task, user_dir=USER_DIR, registry_path=REGISTRY_PATH,
+                data_dir=DATA_DIR))
         except Exception as e:
             logger.error(f"构建账户上下文失败（降级为 legacy 模式）: {e}")
             task_contexts.append(None)
