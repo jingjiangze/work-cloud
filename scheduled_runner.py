@@ -1,149 +1,138 @@
 # -*- coding: utf-8 -*-
-"""定时调度脚本：每日在配置窗口内随机时间执行主任务（Stage 5）。
+"""定时调度脚本（多账户改造 Stage 6）：按账户调度执行主任务。
 
-变更（相对旧版 BASE_TIMES + 固定偏移）：
-- 时间点改为"窗口"概念：在每个窗口 [start, end] 内均匀随机取一个触发时刻；
-- 默认窗口 (09:00-09:10) / (18:30-18:40) 与旧版 09:00/18:30 + 0~10 分钟随机
-  行为等价，老用户无感知；
-- 支持通过环境变量 WORKCLOUD_SCHEDULE 覆盖窗口（可选，不改变用户配置格式）：
-    WORKCLOUD_SCHEDULE='{"windows": [["08:00","09:30"], ["17:30","19:00"]]}'
-- 避免每天固定同一分钟触发，降低大批量任务同时刻执行的稳定性风险。
+变更（Stage 6，相对旧版全局窗口）：
+- Scheduler → Account Registry → 过滤 enabled 账户 → 各账户 schedule_profile
+  → 每账户独立生成当日随机触发时刻 → 到点按账户触发
+- 账户 schedule_profile.enabled=False → 永不调度；
+  windows 未配置 → 使用全局窗口（env 覆盖 → 默认 12:30-12:40 / 17:30-17:40）
+- 到点只执行该账户（execute_tasks(selected_files=[配置文件名])），
+  不再把所有用户捆在同一时刻全量执行
+- 兼容：registry 为空时回退旧全局行为（一次执行全部）；--file 显式指定时
+  仍按全局窗口执行指定文件
+- 随机性仅用于错开本地任务同时启动，不用于任何规避平台检测的行为
 
 用法不变：python scheduled_runner.py [--file name1 name2 ...]
 """
 
-import json
 import logging
-import argparse
 import os
-import random
-import time
 import threading
+import time
 from datetime import datetime, date, timedelta
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-# 导入主任务执行函数
 from main import execute_tasks
+from core import scheduler as sched
+from models import account_registry
 
-# 尝试导入主模块的日志上下文，失败则创建本地版本
 try:
     from main import _log_ctx
 except ImportError:
     _log_ctx = threading.local()
 
 logger = logging.getLogger("scheduler")
-
-# 设置调度器的日志标签
 _log_ctx.tag = "SCHEDULER"
 
-# 默认触发窗口：与生产定制 BASE_TIMES=["12:30","17:30"] + MAX_OFFSET_MINUTES=10 等价
-# （两次都安排在后半天：12:30 主执行，17:30 兜底重跑；报告提交要求 hour>=12）
-DEFAULT_WINDOWS: List[Tuple[str, str]] = [
-    ("12:30", "12:40"),
-    ("17:30", "17:40"),
-]
-
-# 环境变量覆盖（可选）
-ENV_SCHEDULE_KEY = "WORKCLOUD_SCHEDULE"
+# ---- 兼容旧接口（历史调用方/测试可能直接引用） ----
+DEFAULT_WINDOWS = sched.DEFAULT_WINDOWS
+ENV_SCHEDULE_KEY = sched.ENV_SCHEDULE_KEY
+load_windows = sched.load_global_windows
+generate_daily_schedule = sched.generate_daily_schedule
 
 
-def _parse_hhmm(text) -> Optional[Tuple[int, int]]:
-    """解析 HH:MM，非法返回 None。"""
-    try:
-        parts = str(text).strip().split(":")
-        hour, minute = int(parts[0]), int(parts[1])
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
-            return hour, minute
-    except (ValueError, IndexError, AttributeError):
-        pass
-    return None
+def _parse_hhmm(text):
+    return sched.parse_hhmm(text)
 
 
-def load_windows() -> List[Tuple[str, str]]:
-    """加载触发窗口：环境变量 WORKCLOUD_SCHEDULE 优先，非法配置回退默认。"""
-    raw = os.getenv(ENV_SCHEDULE_KEY, "").strip()
-    if not raw:
-        return list(DEFAULT_WINDOWS)
-    try:
-        data = json.loads(raw)
-        windows = []
-        for item in data.get("windows", []):
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                start, end = _parse_hhmm(item[0]), _parse_hhmm(item[1])
-                if start and end and start <= end:
-                    windows.append((f"{start[0]:02d}:{start[1]:02d}",
-                                    f"{end[0]:02d}:{end[1]:02d}"))
-                else:
-                    logger.warning(f"忽略非法窗口: {item}")
-        if windows:
-            logger.info(f"使用环境变量 {ENV_SCHEDULE_KEY} 配置的触发窗口: {windows}")
-            return windows
-        logger.warning(f"{ENV_SCHEDULE_KEY} 中无有效窗口，回退默认窗口")
-    except (json.JSONDecodeError, AttributeError, TypeError) as e:
-        logger.warning(f"{ENV_SCHEDULE_KEY} 解析失败，回退默认窗口: {e}")
-    return list(DEFAULT_WINDOWS)
-
-
-def _random_time_in_window(day: date, window: Tuple[str, str]) -> datetime:
-    """在窗口 [start, end] 内（含边界，分钟粒度）随机取一个时刻。"""
-    start = _parse_hhmm(window[0])
-    end = _parse_hhmm(window[1])
-    start_min = start[0] * 60 + start[1]
-    end_min = end[0] * 60 + end[1]
-    minute_of_day = random.randint(start_min, end_min)
-    return datetime.combine(day, datetime.min.time()).replace(
-        hour=minute_of_day // 60, minute=minute_of_day % 60)
-
-
-def generate_daily_schedule(day: date,
-                            windows: List[Tuple[str, str]]) -> List[datetime]:
-    """为指定日期在每个窗口内生成随机触发时间列表（按时间排序）。"""
-    schedule = [_random_time_in_window(day, w) for w in windows]
-    schedule.sort()
-    logger.info("生成当日计划执行时间: " +
-                ", ".join(d.strftime("%Y-%m-%d %H:%M") for d in schedule))
-    return schedule
-
-
-def get_next_run(now: datetime,
-                 schedule: List[datetime]) -> Optional[datetime]:
-    """从当日计划中获取下一次待执行时间"""
-    for run_at in schedule:
+def get_next_run_time(now: datetime,
+                      times: List[datetime]) -> Optional[datetime]:
+    for run_at in times:
         if run_at > now:
             return run_at
     return None
 
 
+def _enabled_account_files(selected_files: Optional[List[str]]) -> List[Tuple[str, str]]:
+    """返回 [(account_id, config 文件名 stem)]，仅启用账户。
+
+    selected_files 显式给定时仍按 registry 过滤（禁用账户不出列）。
+    注：目录在调用期读取（而非默认参数定义期绑定），便于整体重定向。
+    """
+    user_dir = account_registry.USER_DIR
+    registry_path = account_registry.REGISTRY_PATH
+    account_registry.ensure_registry(user_dir=user_dir,
+                                     registry_path=registry_path)
+    accounts = account_registry.list_accounts(user_dir=user_dir,
+                                              registry_path=registry_path)
+    result = []
+    for acc in accounts:
+        if not acc.enabled:
+            continue
+        if selected_files and os.path.splitext(acc.config_file)[0] not in selected_files:
+            continue
+        result.append((acc.account_id, os.path.splitext(acc.config_file)[0]))
+    return result
+
+
 def run_loop(selected_files: Optional[List[str]]):
-    """主循环：持续等待并在计划时间执行"""
-    windows = load_windows()
+    """主循环：按账户计划等待并在到点时执行该账户任务。"""
+    global_windows = load_windows()
     current_day = date.today()
-    schedule = generate_daily_schedule(current_day, windows)
+    # fired: account_id → 已触发的当日时刻数（保证每时刻只触发一次）
+    fired: Dict[str, int] = {}
+    plans: Dict[str, List[datetime]] = {}
+    legacy_schedule: List[datetime] = []
+    legacy_fired = 0
+
+    def rebuild(day: date):
+        nonlocal plans, legacy_schedule, fired, legacy_fired
+        fired, legacy_fired = {}, 0
+        accounts = [
+            acc for acc in account_registry.list_accounts()
+            if sched.account_schedule_windows(acc, global_windows) is not None
+        ]
+        if selected_files or not accounts:
+            # 显式 --file 或无注册账户：回退旧全局行为
+            legacy_schedule = generate_daily_schedule(day, global_windows)
+            plans = {}
+            logger.info("使用全局窗口调度（legacy 模式）: "
+                        + ", ".join(t.strftime("%H:%M") for t in legacy_schedule))
+        else:
+            legacy_schedule = []
+            plans = sched.build_account_schedules(day, accounts, global_windows)
+            if not plans:
+                logger.warning("没有可调度的启用账户，今日空转")
+
+    rebuild(current_day)
 
     while True:
         now = datetime.now()
-
-        # 日期跨天后重新生成
         if now.date() != current_day:
             current_day = now.date()
-            schedule = generate_daily_schedule(current_day, windows)
+            rebuild(current_day)
 
-        next_run = get_next_run(now, schedule)
+        # 找下一次触发时刻（账户计划优先，legacy 次之）
+        next_run = None
+        for times in plans.values():
+            t = get_next_run_time(now, times)
+            if t and (next_run is None or t < next_run):
+                next_run = t
+        if legacy_schedule:
+            t = get_next_run_time(now, legacy_schedule)
+            if t and (next_run is None or t < next_run):
+                next_run = t
+
         if not next_run:
-            # 当天全部执行完，准备下一天
+            # 当日全部执行完 → 准备下一天
             current_day = now.date() + timedelta(days=1)
-            schedule = generate_daily_schedule(current_day, windows)
-            next_run = get_next_run(datetime.now(), schedule)
+            rebuild(current_day)
+            continue
 
-        wait_seconds = (next_run - datetime.now()).total_seconds()
-        if wait_seconds <= 0:
-            # 保险：立即执行
-            wait_seconds = 0
-
+        wait_seconds = max(0, (next_run - datetime.now()).total_seconds())
         logger.info(f"下一次执行时间: {next_run.strftime('%Y-%m-%d %H:%M:%S')} "
                     f"(等待 {int(wait_seconds)} 秒)")
 
-        # 分段等待，便于 Ctrl+C
         slept = 0
         try:
             while slept < wait_seconds:
@@ -154,11 +143,24 @@ def run_loop(selected_files: Optional[List[str]]):
             logger.info("收到中断信号，退出调度器")
             return
 
-        # 执行任务
+        # 到点：触发所有到时刻的账户（或 legacy 全量一次）
+        now = datetime.now()
         try:
-            logger.info("开始执行 main.execute_tasks")
-            execute_tasks(selected_files)
-            logger.info("本次执行完成")
+            due = sched.due_account_runs(plans, now, fired)
+            for account_id, run_at in due:
+                acc = account_registry.get_account(account_id)
+                if acc is None or not acc.enabled:
+                    continue  # 运行中被禁用 → 跳过
+                file_stem = os.path.splitext(acc.config_file)[0]
+                logger.info(f"触发账户 {account_id} ({file_stem}) "
+                            f"计划时刻 {run_at.strftime('%H:%M')}")
+                execute_tasks([file_stem])
+            if legacy_schedule:
+                while (legacy_fired < len(legacy_schedule)
+                       and legacy_schedule[legacy_fired] <= now):
+                    legacy_fired += 1
+                    logger.info("触发全局执行（legacy 模式）")
+                    execute_tasks(selected_files)
         except KeyboardInterrupt:
             logger.info("收到中断信号，退出调度器")
             return
@@ -167,9 +169,10 @@ def run_loop(selected_files: Optional[List[str]]):
 
 
 def main():
+    import argparse
     parser = argparse.ArgumentParser(
-        description="定时调度脚本：每日在触发窗口内随机时间执行主任务"
-                    f"（可用环境变量 {ENV_SCHEDULE_KEY} 覆盖窗口）")
+        description="定时调度脚本：按账户计划执行主任务"
+                    f"（可用环境变量 {ENV_SCHEDULE_KEY} 覆盖全局窗口）")
     parser.add_argument(
         "--file",
         type=str,
@@ -179,7 +182,7 @@ def main():
     args = parser.parse_args()
 
     windows = load_windows()
-    logger.info("调度器启动。触发窗口: " +
+    logger.info("调度器启动。全局触发窗口: " +
                 ", ".join(f"{s}-{e}" for s, e in windows))
     try:
         run_loop(args.file)
