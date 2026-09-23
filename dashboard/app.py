@@ -4,8 +4,9 @@
 - 纯标准库实现（http.server），零第三方依赖，低占用；
 - 只读：仅读取 data/ 下的状态/台账/风险文件，不提供任何写操作或文件列举；
 - 绑定 127.0.0.1，公网暴露一律经 Cloudflare Tunnel；
-- 访问控制：首次启动自动生成访问密钥 dashboard/secret_key.txt，
-  浏览器通过 /login?key=xxx 换取 HttpOnly Cookie；/health 免认证供探针。
+- 访问控制：登录页（密码表单）→ HttpOnly 会话 Cookie；
+  密码存 dashboard/password.txt（可直接编辑更换，服务端只存 SHA-256）；
+  登录失败指数退避，/health 免认证供探针。
 """
 
 import hashlib
@@ -15,6 +16,7 @@ import os
 import secrets
 import sys
 import threading
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -23,27 +25,33 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(ROOT)
 DATA_DIR = os.path.join(PROJECT, "data")
 STATIC_DIR = os.path.join(ROOT, "static")
-KEY_FILE = os.path.join(ROOT, "secret_key.txt")
+PASSWORD_FILE = os.path.join(ROOT, "password.txt")
 COOKIE_NAME = "wk_dashboard"
 SESSION_TTL = 12 * 3600
 
 PORT = int(os.environ.get("WK_DASHBOARD_PORT", "8792"))
 
-# ---------- 访问密钥 ----------
+# ---------- 登录密码 ----------
 
-def get_access_key() -> str:
-    if os.path.exists(KEY_FILE):
-        with open(KEY_FILE, "r", encoding="utf-8") as f:
-            key = f.read().strip()
-            if key:
-                return key
-    key = secrets.token_urlsafe(18)
-    with open(KEY_FILE, "w", encoding="utf-8") as f:
-        f.write(key)
-    return key
+def _load_password_hash() -> str:
+    """读 password.txt（明文，可随时编辑更换），内存中只保留 SHA-256。"""
+    if os.path.exists(PASSWORD_FILE):
+        with open(PASSWORD_FILE, "r", encoding="utf-8") as f:
+            pw = f.read().strip()
+            if pw:
+                return hashlib.sha256(pw.encode("utf-8")).hexdigest()
+    pw = secrets.token_urlsafe(9)  # 首次启动自动生成，写入明文文件供查看
+    with open(PASSWORD_FILE, "w", encoding="utf-8") as f:
+        f.write(pw)
+    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
 
 
-ACCESS_KEY = get_access_key()
+PASSWORD_HASH = _load_password_hash()
+
+# 登录失败退避（防爆破：连续失败按次数线性加长校验耗时）
+_fail_lock = threading.Lock()
+_fail_count = 0
+
 _sessions: dict = {}
 _sessions_lock = threading.Lock()
 
@@ -190,22 +198,33 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/login":
-            key = parse_qs(parsed.query).get("key", [""])[0]
-            if hmac.compare_digest(key, ACCESS_KEY):
-                token = _new_session()
-                self._send(302, b"", "text/plain",
-                           {"Location": "/",
-                            "Set-Cookie": f"{COOKIE_NAME}={token}; Path=/; "
-                                          f"HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL}"})
-            else:
-                self._send(401, "访问密钥错误".encode("utf-8"),
-                           "text/plain; charset=utf-8")
+            # 已登录直接进看板；未登录显示登录页（?error=1 显示错误提示）
+            if self._authed():
+                self._send(302, b"", "text/plain", {"Location": "/"})
+                return
+            try:
+                with open(os.path.join(STATIC_DIR, "login.html"), "rb") as f:
+                    body = f.read()
+            except OSError:
+                self._send(500, b"login page missing", "text/plain")
+                return
+            if parse_qs(parsed.query).get("error", [""])[0]:
+                err_html = '<div class="error">密码错误，请重试</div>'.encode("utf-8")
+                body = body.replace(b"<!--ERR-->", err_html)
+            self._send(200, body, "text/html; charset=utf-8")
+            return
+
+        if path == "/logout":
+            token = _parse_cookie(self.headers.get("Cookie", ""))
+            with _sessions_lock:
+                _sessions.pop(token, None)
+            self._send(302, b"", "text/plain",
+                       {"Location": "/login",
+                        "Set-Cookie": f"{COOKIE_NAME}=; Path=/; Max-Age=0"})
             return
 
         if not self._authed():
-            self._send(401,
-                       "未授权。请通过 /login?key=访问密钥 登录。".encode("utf-8"),
-                       "text/plain; charset=utf-8")
+            self._send(302, b"", "text/plain", {"Location": "/login"})
             return
 
         if path == "/" or path == "/index.html":
@@ -231,13 +250,44 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send(404, b"not found", "text/plain")
 
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path != "/login":
+            self._send(404, b"not found", "text/plain")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body = self.rfile.read(min(length, 8192)).decode("utf-8")
+        except (ValueError, OSError):
+            body = ""
+        password = parse_qs(body).get("password", [""])[0]
+
+        global _fail_count
+        if hmac.compare_digest(
+                hashlib.sha256(password.encode("utf-8")).hexdigest(),
+                PASSWORD_HASH):
+            with _fail_lock:
+                _fail_count = 0
+            token = _new_session()
+            self._send(302, b"", "text/plain",
+                       {"Location": "/",
+                        "Set-Cookie": f"{COOKIE_NAME}={token}; Path=/; "
+                                      f"HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL}"})
+            return
+        # 防爆破：连续失败线性加长响应耗时（0.5s × 次数，封顶 5s）
+        with _fail_lock:
+            _fail_count += 1
+            time.sleep(min(0.5 * _fail_count, 5.0))
+        self._send(302, b"", "text/plain",
+                   {"Location": "/login?error=1"})
+
 
 def main():
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     # pythonw 下 sys.stdout 为 None，print 会抛错导致静默启动失败
     if sys.stdout is not None:
         print(f"work-cloud dashboard on http://127.0.0.1:{PORT} "
-              f"(access key: {KEY_FILE})", flush=True)
+              f"(password file: {PASSWORD_FILE})", flush=True)
     server.serve_forever()
 
 

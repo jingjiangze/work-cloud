@@ -47,3 +47,4 @@ data/
 logs/
 reports/
 dashboard/secret_key.txt
+dashboard/password.txt
