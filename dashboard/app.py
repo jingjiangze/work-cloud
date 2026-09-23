@@ -13,6 +13,7 @@ import hmac
 import json
 import os
 import secrets
+import sys
 import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -233,8 +234,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"work-cloud dashboard on http://127.0.0.1:{PORT} "
-          f"(access key: {KEY_FILE})", flush=True)
+    # pythonw 下 sys.stdout 为 None，print 会抛错导致静默启动失败
+    if sys.stdout is not None:
+        print(f"work-cloud dashboard on http://127.0.0.1:{PORT} "
+              f"(access key: {KEY_FILE})", flush=True)
     server.serve_forever()
 
 
