@@ -47,8 +47,9 @@ class _FakeApiClient:
     created = []          # [(config_path, instance_id)]
     instances = []
 
-    def __init__(self, config):
+    def __init__(self, config, context=None):
         self.config = config
+        self.context = context
         self.token = f"token_{id(self)}"   # 模拟每实例独立 token
         _FakeApiClient.created.append((getattr(config, "_path", None),
                                        self.token))
@@ -158,7 +159,10 @@ class TestMultiAccountDrill(unittest.TestCase):
             self.assertTrue(os.path.exists(risk_path), f"{aid} 风险事件丢失")
             with open(risk_path, encoding="utf-8") as f:
                 events = json.load(f)["events"]
-            self.assertEqual({e["user"] for e in events}, {aid})
+            # 台账对含数字标识统一脱敏（隐私正确）；用其自身 _mask_user 对齐期望
+            from models.risk_ledger import _mask_user
+            self.assertEqual({e["user"] for e in events},
+                             {_mask_user(aid)})
 
         # Session/Client 不串线：两次 ApiClient 构造绑定两个不同配置文件，
         # 且每实例 token 互不相同

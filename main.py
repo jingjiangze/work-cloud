@@ -43,6 +43,7 @@ from models.task_state import (
     STATE_UNKNOWN,
 )
 from core.account_context import AccountContext
+from services.session_manager import default_session_manager
 
 # 日志上下文支持
 _log_ctx = threading.local()
@@ -712,10 +713,22 @@ def run(config: ConfigManager,
                 })
             return results
 
-        api_client = ApiClient(config)
+        # Stage 4: 显式绑定账户上下文；创建即登记会话（token 取自本账户
+        # 配置），后续重登/验证/失效均只作用于本账户
+        api_client = ApiClient(config, context=context)
+        if context:
+            session_manager = default_session_manager()
+            session_manager.register(context.account_id,
+                                     config.get_value("userInfo.token") or "")
         api_client.user_key = user_key  # L6: 风险事件台账归属用户
         # Stage 3: 登录检查层——会话预检 + 失败分类（密码/验证码/超时/网络/服务端）
         login_ok, _category, login_message = ensure_login(api_client)
+        if context:
+            if login_ok:
+                session_manager.mark_verified(context.account_id)
+            else:
+                # 仅失效本账户会话，其他账户不受影响
+                session_manager.invalidate(context.account_id)
         if state_store:
             state_store.mark(
                 user_key, "login",

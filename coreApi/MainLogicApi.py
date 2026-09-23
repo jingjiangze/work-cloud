@@ -58,17 +58,34 @@ class ApiClient:
         "host": "api.moguding.net:9000",
     }
 
-    def __init__(self, config: ConfigManager):
+    def __init__(self, config: ConfigManager, context=None):
         """
         初始化ApiClient实例。
 
         Args:
             config (ConfigManager): 用于管理配置的实例。
+            context: AccountContext（Stage 4 起显式绑定账户；None 时
+                     legacy 行为不变，账户标识退回 user_key 属性）。
         """
         self.config = config
+        self.context = context
+        self.account_id = context.account_id if context else None
         self.max_retries = 5  # 控制重新尝试的次数
         self.session = requests.Session()
         self.session.headers.update(self.DEFAULT_HEADERS)
+        # Stage 4: 进程级会话登记簿（重登只更新本账户会话）
+        from services.session_manager import default_session_manager
+        self.session_manager = default_session_manager()
+
+    def _on_token_obtained(self) -> None:
+        """登录成功拿到新 token 后登记会话（仅本账户）。"""
+        if not self.account_id:
+            return
+        try:
+            token = self.config.get_value("userInfo.token") or ""
+            self.session_manager.register(self.account_id, token)
+        except Exception as e:  # 会话登记失败绝不影响业务
+            logger.warning(f"会话登记失败（忽略）: {e}")
 
     def _post_request(
         self,
@@ -280,6 +297,8 @@ class ApiClient:
         rsp = self._post_request(url, self.DEFAULT_HEADERS, data)
         user_info = json.loads(aes_decrypt(rsp.get("data", "")))
         self.config.update_config(user_info, "userInfo")
+        # Stage 4: 重登只登记本账户会话，不影响其他账户
+        self._on_token_obtained()
 
     def fetch_internship_plan(self) -> None:
         """获取当前用户的实习计划"""
