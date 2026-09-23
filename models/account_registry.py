@@ -20,7 +20,7 @@ import os
 import shutil
 import threading
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from models.account import Account, generate_account_id
 
@@ -286,3 +286,14 @@ def disable_account(account_id: str,
                     user_dir: str = USER_DIR,
                     registry_path: str = REGISTRY_PATH) -> Optional[Account]:
     return update_account(account_id, user_dir, registry_path, enabled=False)
+
+
+def set_task_policy(account_id: str,
+                    policy: Optional[Dict[str, Any]],
+                    user_dir: str = USER_DIR,
+                    registry_path: str = REGISTRY_PATH) -> Optional[Account]:
+    """设置账户任务开关（Stage 5：经 models.task_policy.normalize_policy
+    清洗后落库；传 None/{} 表示清空策略、全部交回原配置旗标）。"""
+    from models.task_policy import normalize_policy
+    return update_account(account_id, user_dir, registry_path,
+                          task_policy=normalize_policy(policy) or None)

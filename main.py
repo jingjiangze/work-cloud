@@ -44,6 +44,8 @@ from models.task_state import (
 )
 from core.account_context import AccountContext
 from services.session_manager import default_session_manager
+from models.task_policy import resolve_decisions, TASK_LABELS
+from models import account_registry
 
 # 日志上下文支持
 _log_ctx = threading.local()
@@ -695,6 +697,33 @@ def run(config: ConfigManager,
             state_store = TaskStateStore()
             user_key = derive_user_key(config)
 
+        # Stage 5: 任务决策链第 1~2 层（Registry enabled → task_policy）；
+        # 第 3 层（原配置旗标）在 resolve_decisions 内一并判定。
+        # 全部任务被禁用时连登录都不发起（减少无意义请求）。
+        task_decisions = None
+        if context:
+            account = account_registry.get_account(
+                context.account_id, user_dir=USER_DIR,
+                registry_path=REGISTRY_PATH)
+            if account is not None and not account.enabled:
+                results.append({
+                    "status": "skip",
+                    "message": "账户已禁用（registry enabled=False）",
+                    "task_type": "账户开关",
+                })
+                return results
+            task_decisions = resolve_decisions(
+                account.task_policy if account else None, config)
+            if not any(ok for ok, _ in task_decisions.values()):
+                for key in TASK_LABELS:
+                    _ok, reason = task_decisions[key]
+                    results.append({
+                        "status": "skip",
+                        "message": reason or "已禁用",
+                        "task_type": TASK_LABELS[key],
+                    })
+                return results
+
         # L5: 启动前只读预检（0 次业务请求 + 至多 1 次 TCP 探测），
         # 关键条件不满足直接 STOP，不带着必败状态发起登录/提交
         report = run_preflight(config, state_store, user_key)
@@ -753,13 +782,39 @@ def run(config: ConfigManager,
         )
 
         # L4: 顺序执行；验证码熔断时立即阻断本用户剩余任务（失败保护）
-        task_funcs = [
-            ("打卡", lambda: perform_clock_in(api_client, config, state_store, user_key)),
-            ("日报提交", lambda: submit_daily_report(api_client, config, state_store, user_key)),
-            ("周报提交", lambda: submit_weekly_report(config, api_client, state_store, user_key)),
-            ("月报提交", lambda: submit_monthly_report(config, api_client, state_store, user_key)),
-        ]
         results = []
+        if task_decisions is not None:
+            # Stage 5: 决策层禁用的任务——记 SKIPPED（带原因），不发任何请求
+            for key in TASK_LABELS:
+                _ok, reason = task_decisions[key]
+                if not _ok:
+                    results.append({
+                        "status": "skip",
+                        "message": reason,
+                        "task_type": TASK_LABELS[key],
+                    })
+                    if state_store:
+                        state_store.mark(user_key, TASK_LABELS[key],
+                                         "SKIPPED", reason)
+            _candidate_funcs = [
+                ("checkin", lambda: perform_clock_in(
+                    api_client, config, state_store, user_key)),
+                ("daily_report", lambda: submit_daily_report(
+                    api_client, config, state_store, user_key)),
+                ("weekly_report", lambda: submit_weekly_report(
+                    config, api_client, state_store, user_key)),
+                ("monthly_report", lambda: submit_monthly_report(
+                    config, api_client, state_store, user_key)),
+            ]
+            task_funcs = [(TASK_LABELS[k], fn) for k, fn in _candidate_funcs
+                          if task_decisions[k][0]]
+        else:
+            task_funcs = [
+                ("打卡", lambda: perform_clock_in(api_client, config, state_store, user_key)),
+                ("日报提交", lambda: submit_daily_report(api_client, config, state_store, user_key)),
+                ("周报提交", lambda: submit_weekly_report(config, api_client, state_store, user_key)),
+                ("月报提交", lambda: submit_monthly_report(config, api_client, state_store, user_key)),
+            ]
         for idx, (label, fn) in enumerate(task_funcs):
             result = fn()
             results.append(result)
