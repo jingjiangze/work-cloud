@@ -36,10 +36,11 @@ logger = logging.getLogger("scheduler")
 # 设置调度器的日志标签
 _log_ctx.tag = "SCHEDULER"
 
-# 默认触发窗口：与旧版 BASE_TIMES=["09:00","18:30"] + MAX_OFFSET_MINUTES=10 等价
+# 默认触发窗口：与生产定制 BASE_TIMES=["12:30","17:30"] + MAX_OFFSET_MINUTES=10 等价
+# （两次都安排在后半天：12:30 主执行，17:30 兜底重跑；报告提交要求 hour>=12）
 DEFAULT_WINDOWS: List[Tuple[str, str]] = [
-    ("09:00", "09:10"),
-    ("18:30", "18:40"),
+    ("12:30", "12:40"),
+    ("17:30", "17:40"),
 ]
 
 # 环境变量覆盖（可选）
