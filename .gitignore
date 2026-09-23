@@ -46,3 +46,4 @@ user/*
 data/
 logs/
 reports/
+dashboard/secret_key.txt

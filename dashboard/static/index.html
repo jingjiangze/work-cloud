@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>work-cloud 执行看板</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #1a2130; --panel2: #212a3d; --border: #2c3650;
+    --text: #e6eaf2; --muted: #8a94ab; --green: #34d399; --red: #f87171;
+    --orange: #fbbf24; --blue: #60a5fa; --gray: #6b7280; --accent: #7c8cf8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 14px; padding: 20px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 18px; flex-wrap: wrap; gap: 10px;
+  }
+  h1 { font-size: 20px; font-weight: 600; }
+  h1 .dot { color: var(--green); }
+  .meta { color: var(--muted); font-size: 12px; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=date], button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px; font-size: 13px; outline: none;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; margin-bottom: 14px;
+  }
+  .card h2 { font-size: 13px; color: var(--muted); font-weight: 600;
+    text-transform: uppercase; letter-spacing: .05em; margin-bottom: 12px; }
+  .user-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+  .user-name { font-size: 15px; font-weight: 600; }
+  .task-row { display: flex; justify-content: space-between; align-items: center;
+    padding: 7px 0; border-top: 1px solid var(--border); }
+  .task-name { color: var(--muted); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 20px;
+    font-size: 12px; font-weight: 600; }
+  .b-success { background: rgba(52,211,153,.15); color: var(--green); }
+  .b-fail    { background: rgba(248,113,113,.15); color: var(--red); }
+  .b-unknown { background: rgba(251,191,36,.15); color: var(--orange); }
+  .b-skip    { background: rgba(107,114,128,.2);  color: var(--gray); }
+  .b-running { background: rgba(96,165,250,.15);  color: var(--blue); }
+  .msg { color: var(--muted); font-size: 12px; margin-top: 6px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-top: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .stat-row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .stat { flex: 1; min-width: 120px; background: var(--panel2);
+    border-radius: 10px; padding: 12px; text-align: center; }
+  .stat .num { font-size: 22px; font-weight: 700; }
+  .stat .lbl { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .empty { color: var(--muted); text-align: center; padding: 18px 0; }
+  .refresh-note { color: var(--muted); font-size: 12px; }
+  .spin { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    animation: r 1s linear infinite; vertical-align: -1px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  .typechips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .chip { background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 4px 10px; font-size: 12px; }
+  .chip b { color: var(--orange); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1><span class="dot">&#9679;</span> work-cloud 执行看板</h1>
+      <div class="meta">服务器时间: <span id="srv-time">-</span> <span class="refresh-note">| <span class="spin"></span> 每 30 秒自动刷新</span></div>
+    </div>
+    <div class="controls">
+      <input type="date" id="datepick">
+      <button onclick="load()">查询</button>
+      <button onclick="loadToday()">今天</button>
+    </div>
+  </header>
+
+  <div class="card" id="stats-card" style="display:none">
+    <h2>累计统计</h2>
+    <div class="stat-row" id="stats"></div>
+  </div>
+
+  <h2 style="font-size:13px;color:var(--muted);margin:6px 0 10px" id="day-title">今日进度</h2>
+  <div class="grid" id="users"><div class="card empty">加载中…</div></div>
+
+  <div class="card" style="margin-top:4px">
+    <h2>风险事件 <span class="meta" id="risk-date"></span></h2>
+    <div class="typechips" id="risk-chips"></div>
+    <div id="risk-table"></div>
+  </div>
+
+  <div class="card">
+    <h2>执行历史（该日台账）</h2>
+    <div id="history-table"></div>
+  </div>
+</div>
+
+<script>
+const STATUS_MAP = {
+  SUCCESS: ["b-success","成功"], FAILED: ["b-fail","失败"],
+  UNKNOWN: ["b-unknown","未知"], SKIPPED: ["b-skip","跳过"],
+  RUNNING: ["b-running","执行中"],
+};
+const TASK_LABEL = {
+  login:"登录", checkin:"打卡", daily_report:"日报",
+  weekly_report:"周报", monthly_report:"月报",
+};
+const RISK_LABEL = {
+  CAPTCHA_REQUIRED:"验证码出现", CAPTCHA_CIRCUIT_BREAK:"验证码熔断",
+  SUBMIT_UNKNOWN:"提交未知", NETWORK_RETRY:"网络重试",
+  AUTH_FAILURE:"登录失败", DUPLICATE_PREVENTED:"已防重复",
+  SECOND_INSTANCE_BLOCKED:"并发拦截",
+};
+
+function esc(s){ return String(s??"").replace(/[&<>"]/g,
+  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+function badge(state){
+  const [cls, label] = STATUS_MAP[state] || ["b-skip", state||"-"];
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+
+function renderUsers(state, history){
+  const box = document.getElementById("users");
+  const histByUser = {};
+  (history?.entries||[]).forEach(e => histByUser[e.user] = e);
+  // 合并：状态文件里的 user 键 + 台账里的 user 键
+  const names = new Set([
+    ...state.map(s => s.user || (s.userInfo||{}).userId || "?"),
+    ...Object.keys(histByUser),
+  ]);
+  if (!names.size || (names.size===1 && names.has("?"))) {
+    box.innerHTML = `<div class="card empty">该日暂无执行记录</div>`; return;
+  }
+  let html = "";
+  names.forEach(u => {
+    const st = state.find(s => (s.user || "") === u) || {};
+    const tasks = st.tasks || {};
+    const h = histByUser[u];
+    let rows = "";
+    ["login","checkin","daily_report","weekly_report","monthly_report"].forEach(k=>{
+      const t = tasks[k];
+      if (t) rows += `<div class="task-row">
+        <span class="task-name">${TASK_LABEL[k]||k}</span>
+        ${badge(t.state)} </div>
+        ${t.message?`<div class="msg" title="${esc(t.message)}">${esc(t.message)}</div>`:""}`;
+    });
+    if (h) rows += `<div class="task-row">
+      <span class="task-name">最近一轮</span>
+      <span class="meta">${esc(h.started_at||"")} · ${h.duration_sec??"-"}s</span></div>`;
+    html += `<div class="card"><div class="user-head">
+      <span class="user-name">${esc(u)}</span>
+      <span class="meta">${st.date?esc(st.date):""}</span></div>${rows || '<div class="empty">无任务记录</div>'}</div>`;
+  });
+  box.innerHTML = html;
+}
+
+function renderRisk(risk){
+  const events = risk?.events || [];
+  const chips = document.getElementById("risk-chips");
+  const table = document.getElementById("risk-table");
+  document.getElementById("risk-date").textContent = risk?.date ? `(${risk.date})` : "";
+  const counts = {};
+  events.forEach(e => counts[e.event_type] = (counts[e.event_type]||0)+1);
+  chips.innerHTML = events.length
+    ? Object.entries(counts).map(([t,n]) =>
+        `<span class="chip">${RISK_LABEL[t]||esc(t)} <b>${n}</b></span>`).join("")
+    : `<span class="chip" style="color:var(--green)">无风险事件 ✓</span>`;
+  table.innerHTML = events.length ? `<table><tr><th>时间</th><th>用户</th><th>任务</th><th>事件</th><th>阶段</th><th>动作</th><th>结果</th></tr>` +
+    events.slice(-30).reverse().map(e=>`<tr>
+      <td>${esc(e.time)}</td><td>${esc(e.user)}</td><td>${esc(e.task)}</td>
+      <td>${RISK_LABEL[e.event_type]||esc(e.event_type)}</td>
+      <td>${esc(e.stage)}</td><td>${esc(e.action)}</td>
+      <td class="msg" style="max-width:220px" title="${esc(e.result)}">${esc(e.result)}</td></tr>`).join("") +
+    `</table>` : `<div class="empty">该日无风险事件</div>`;
+}
+
+function renderHistory(history){
+  const box = document.getElementById("history-table");
+  const entries = history?.entries || [];
+  box.innerHTML = entries.length ? `<table><tr><th>用户</th><th>开始</th><th>耗时</th><th>任务结果</th></tr>` +
+    entries.map(e=>`<tr><td>${esc(e.user)}</td><td>${esc(e.started_at)}</td>
+      <td>${e.duration_sec??"-"}s</td>
+      <td>${(e.results||[]).map(r=>
+        `${esc(r.task_type)} ${badge(r.status?.toUpperCase?r.status.toUpperCase():r.status)}`
+      ).join("<br>")}</td></tr>`).join("") + `</table>`
+    : `<div class="empty">该日暂无台账记录</div>`;
+}
+
+function renderStats(stats){
+  const card = document.getElementById("stats-card");
+  if (!stats || !stats.total_runs) { card.style.display = "none"; return; }
+  card.style.display = "";
+  const items = [
+    ["总轮次", stats.total_runs], ["成功", stats.success_runs],
+    ["失败", stats.failed_runs], ["未知", stats.unknown_tasks ?? 0],
+    ["平均耗时", (stats.avg_duration_sec||0) + "s"], ["覆盖天数", stats.days],
+  ];
+  document.getElementById("stats").innerHTML = items.map(([l,v])=>
+    `<div class="stat"><div class="num">${esc(v)}</div><div class="lbl">${l}</div></div>`).join("");
+}
+
+async function load(date){
+  date = date || document.getElementById("datepick").value;
+  const url = date ? `/api/history?date=${date}` : "/api/overview";
+  const r = await fetch(url);
+  if (r.status === 401) { location.href = "/"; return; }
+  const data = await r.json();
+  if (date) {
+    document.getElementById("day-title").textContent = `进度（${date}）`;
+    document.getElementById("srv-time").textContent = "-";
+    // 查历史日期：state 无单独接口，用 overview 的当日 state 不适用；仅渲染台账
+    document.getElementById("users").innerHTML = "";
+    renderHistory(data.history);
+    renderRisk(data.risk);
+    return;
+  }
+  document.getElementById("srv-time").textContent = data.server_time;
+  renderUsers(data.state, data.history);
+  renderRisk(data.risk);
+  renderHistory(data.history);
+  renderStats(data.statistics);
+}
+
+function loadToday(){
+  document.getElementById("datepick").value = "";
+  load();
+}
+
+document.getElementById("datepick").addEventListener("change", e=>load(e.target.value));
+loadToday();
+setInterval(()=>{ if(!document.getElementById("datepick").value) load(); }, 30000);
+</script>
+</body>
+</html>
