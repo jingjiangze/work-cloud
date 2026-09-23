@@ -41,6 +41,7 @@ from models.task_state import (
     STATE_LOGIN_SUCCESS,
     STATE_UNKNOWN,
 )
+from core.account_context import AccountContext
 
 # 日志上下文支持
 _log_ctx = threading.local()
@@ -648,17 +649,24 @@ def submit_monthly_report(
     )
 
 
-def run(config: ConfigManager) -> List[Dict[str, Any]]:
-    """执行所有任务（返回结果列表供执行历史记录）"""
-    # 设置日志上下文标签
-    try:
-        file_part = "ENV"
-        path_attr = getattr(config, "_path", None)
-        if path_attr:
-            file_part = os.path.splitext(os.path.basename(str(path_attr)))[0]
+def run(config: ConfigManager,
+        context: Optional[AccountContext] = None) -> List[Dict[str, Any]]:
+    """执行所有任务（返回结果列表供执行历史记录）
 
+    context: 账户执行上下文（Stage 2 起显式传递，禁止依赖全局变量判账号）；
+             None 时保持 legacy 行为（环境变量配置 / 旧调用方兼容）。
+    """
+    # 设置日志上下文标签（显式身份：context.account_id 优先，绝不取自全局变量）
+    try:
         nickname = desensitize_name(config.get_value("userInfo.nikeName")) or "?"
-        _log_ctx.tag = f"{file_part}|{nickname}"
+        if context:
+            _log_ctx.tag = f"{context.account_id}|{nickname}"
+        else:
+            file_part = "ENV"
+            path_attr = getattr(config, "_path", None)
+            if path_attr:
+                file_part = os.path.splitext(os.path.basename(str(path_attr)))[0]
+            _log_ctx.tag = f"{file_part}|{nickname}"
     except Exception:
         _log_ctx.tag = "-"
 
@@ -825,8 +833,21 @@ def _execute_tasks_impl(selected_files: Optional[List[str]] = None):
         logger.error("没有成功创建任何任务")
         return
 
+    # Stage 2: 每个任务显式构建 AccountContext（自动注册进 registry）；
+    # 构建失败不阻断 legacy 路径——context=None 时 run() 行为与旧版一致
+    task_contexts: List[Optional[AccountContext]] = []
+    for task in tasks:
+        try:
+            task_contexts.append(AccountContext.from_config(task))
+        except Exception as e:
+            logger.error(f"构建账户上下文失败（降级为 legacy 模式）: {e}")
+            task_contexts.append(None)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_task = {executor.submit(run, task): task for task in tasks}
+        future_to_task = {
+            executor.submit(run, task, ctx): task
+            for task, ctx in zip(tasks, task_contexts)
+        }
         for future in concurrent.futures.as_completed(future_to_task):
             task = future_to_task[future]
             try:
