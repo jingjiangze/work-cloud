@@ -33,7 +33,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DEFAULT_DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
 
 ACCOUNT_SUBDIRS = ("state", "history", "risk", "logs", "reports",
-                   "uploads", "session")
+                   "uploads", "session", "ledger")
 
 
 @dataclass
@@ -83,6 +83,11 @@ class AccountContext:
     @property
     def session_dir(self) -> str:
         return os.path.join(self.runtime_dir, "session")
+
+    @property
+    def ledger_dir(self) -> str:
+        """Stage 8: run_id 执行台账目录。"""
+        return os.path.join(self.runtime_dir, "ledger")
 
     def ensure_dirs(self) -> None:
         for name in ACCOUNT_SUBDIRS:

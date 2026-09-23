@@ -48,6 +48,7 @@ from core.account_context import AccountContext
 from services.session_manager import default_session_manager
 from models.task_policy import resolve_decisions, TASK_LABELS
 from models import account_registry
+from models import execution_ledger
 
 # 日志上下文支持
 _log_ctx = threading.local()
@@ -685,6 +686,7 @@ def run(config: ConfigManager,
     started_at = datetime.now().strftime("%H:%M:%S")
     start_dt = datetime.now()
     user_key = "unknown"
+    run_id: Optional[str] = None
 
     try:
         pusher = MessagePusher(config.get_value("config.pushNotifications"))
@@ -699,6 +701,11 @@ def run(config: ConfigManager,
         else:
             state_store = TaskStateStore()
             user_key = derive_user_key(config)
+
+        # Stage 8: 本轮运行的 run_id（台账轮次标识，贯穿日志与历史）
+        run_id = execution_ledger.new_run_id(
+            context.account_id if context else user_key)
+        logger.info(f"[{run_id}] 开始执行")
 
         # Stage 5: 任务决策链第 1~2 层（Registry enabled → task_policy）；
         # 第 3 层（原配置旗标）在 resolve_decisions 内一并判定。
@@ -867,6 +874,32 @@ def run(config: ConfigManager,
                 account_lock.release()
             except Exception as e:  # 释放失败不阻断收尾（OS 兜底）
                 logger.warning(f"账户锁释放异常: {e}")
+        # Stage 8: run_id 执行台账——记录本轮每个任务的粒度结果
+        try:
+            ledger_dir = (context.ledger_dir if context
+                          else execution_ledger.DEFAULT_LEDGER_DIR)
+            tasks = [
+                {
+                    "task_type": r.get("task_type", ""),
+                    "status": r.get("status", ""),
+                    "message": str(r.get("message", "")),
+                    "attempt": idx,
+                    "verification": r.get("verification"),
+                }
+                for idx, r in enumerate(results)
+            ]
+            execution_ledger.append_run(ledger_dir, {
+                "run_id": run_id or execution_ledger.new_run_id(user_key),
+                "account_id": context.account_id if context else None,
+                "user": user_key,
+                "started_at": started_at,
+                "ended_at": datetime.now().strftime("%H:%M:%S"),
+                "duration_sec": (datetime.now() - start_dt).total_seconds(),
+                "status": execution_ledger.summarize_results(results),
+                "tasks": tasks,
+            })
+        except Exception as e:  # 台账失败绝不影响收尾
+            logger.warning(f"执行台账记录失败（忽略）: {e}")
         if pusher:
             try:
                 pusher.push(results)
