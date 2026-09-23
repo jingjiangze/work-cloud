@@ -46,6 +46,10 @@ from models.task_state import (
 )
 from core.account_context import AccountContext
 from services.session_manager import default_session_manager
+from services.verification_service import (
+    for_submit_result,
+    resolve_unknown_tasks,
+)
 from models.task_policy import resolve_decisions, TASK_LABELS
 from models import account_registry
 from models import execution_ledger
@@ -812,6 +816,32 @@ def run(config: ConfigManager,
         )
 
         # L4: 顺序执行；验证码熔断时立即阻断本用户剩余任务（失败保护）
+        # Stage 9: 跨轮 UNKNOWN 只读收敛——上一轮结果未知的任务，先查
+        # 服务端是否已有记录：有 → 判成功（本轮幂等跳过）；无 → 放行
+        # 本轮正常执行；核验失败 → 维持 UNKNOWN。绝不盲目重提交。
+        # 状态键使用去重判定同款英文键（daily_report/monthly_report）。
+        # （打卡/周报的跨轮核验受 checkin_type/周次参数依赖限制，本轮
+        # 仅收敛日报与月报；它们的轮内 L3 核验不受影响。）
+        if state_store:
+            try:
+                _enabled_state_keys = [
+                    k for k in ("checkin", "daily_report", "weekly_report",
+                                "monthly_report")
+                    if task_decisions is None or task_decisions[k][0]
+                ]
+                _report_verify = {
+                    "daily_report": lambda: _report_exists_on_server(
+                        api_client, "day", datetime.now(), 0),
+                    "monthly_report": lambda: _report_exists_on_server(
+                        api_client, "month", datetime.now(), 0),
+                }
+                resolve_unknown_tasks(
+                    state_store, user_key, _enabled_state_keys,
+                    _report_verify, success_state_for,
+                    record_event_fn=record_event)
+            except Exception as e:
+                logger.warning(f"UNKNOWN 跨轮收敛失败（忽略）: {e}")
+
         results = []
         if task_decisions is not None:
             # Stage 5: 决策层禁用的任务——记 SKIPPED（带原因），不发任何请求
@@ -847,6 +877,10 @@ def run(config: ConfigManager,
             ]
         for idx, (label, fn) in enumerate(task_funcs):
             result = fn()
+            if isinstance(result, dict):
+                # Stage 9: 统一验证结论（随结果进历史与执行台账）
+                result["verification"] = for_submit_result(
+                    result.get("status", "")).to_dict()
             results.append(result)
             if result.get("captcha_exhausted"):
                 logger.error(f"[CAPTCHA_EXHAUSTED] {label}触发验证码熔断，"

@@ -161,7 +161,10 @@ class TestRunLedgerIntegration(unittest.TestCase):
         self.assertEqual(types["打卡"]["status"], "success")
         self.assertEqual(types["月报提交"]["status"], "skip")
         self.assertIn("账户任务开关", types["月报提交"]["message"])
-        self.assertIsNone(types["打卡"]["verification"])  # Stage 9 填充
+        # Stage 9 已填充验证结论（成功任务带 method/verified）
+        self.assertEqual(types["打卡"]["verification"]["verified"], True)
+        self.assertEqual(types["打卡"]["verification"]["method"],
+                         "submit+server-verify")
         # results 与台账同轮次
         self.assertEqual(len(results), len(rec["tasks"]))
 
