@@ -23,6 +23,7 @@
 
 import logging
 import os
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -122,3 +123,59 @@ def default_lock_path(data_dir: Optional[str] = None) -> str:
     base = data_dir or os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
     return os.path.join(base, "run.lock")
+
+
+class AccountRunLock(LocalRunLock):
+    """账户级运行锁（Stage 7）：同一账户同一时刻只允许一个执行实例。
+
+    两层防护：
+    - 进程内：每账户一把 threading.Lock（同进程双线程 A+A 立即 BLOCK）；
+    - 跨进程：继承 LocalRunLock 的 OS 文件锁（另一进程持有 → BLOCK）。
+
+    语义：A+A → BLOCK；A running + B waiting → 正常并行。
+    锁文件位于 data/accounts/{account_id}/run.lock，进程死亡由 OS 兜底
+    释放，不会死锁。
+    """
+
+    _proc_locks: dict = {}
+    _proc_locks_guard = threading.Lock()
+
+    def __init__(self, path: str, account_id: str):
+        super().__init__(path)
+        self.account_id = account_id
+        self._proc_lock: Optional[threading.Lock] = None
+
+    def acquire(self) -> bool:
+        # 第 1 层：进程内线程互斥
+        with AccountRunLock._proc_locks_guard:
+            proc = AccountRunLock._proc_locks.setdefault(
+                self.account_id, threading.Lock())
+        self._proc_lock = proc
+        if not proc.acquire(blocking=False):
+            logger.info(f"账户锁(线程层)被持有: {self.account_id}")
+            self._proc_lock = None
+            return False
+        # 第 2 层：跨进程 OS 文件锁
+        if not super().acquire():
+            proc.release()
+            self._proc_lock = None
+            logger.info(f"账户锁(进程层)被持有: {self.account_id}")
+            return False
+        return True
+
+    def release(self) -> None:
+        super().release()
+        if self._proc_lock is not None:
+            try:
+                self._proc_lock.release()
+            except RuntimeError:
+                pass
+            self._proc_lock = None
+
+
+def default_account_lock_path(account_id: str,
+                              data_dir: Optional[str] = None) -> str:
+    """账户锁文件路径：data/accounts/{account_id}/run.lock。"""
+    base = data_dir or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    return os.path.join(base, "accounts", account_id, "run.lock")

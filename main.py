@@ -13,6 +13,7 @@ from coreApi.AiServiceClient import generate_article
 from util.Config import ConfigManager
 from util.MessagePush import MessagePusher
 from util.HelperFunctions import desensitize_name, is_holiday
+from util.local_run_lock import AccountRunLock, default_account_lock_path
 from util.FileUploader import upload_img
 from util.structured_logging import setup_file_logging
 from util.report_validator import (
@@ -31,6 +32,7 @@ from models.risk_ledger import (
     EVENT_DUPLICATE_PREVENTED,
     EVENT_AUTH_FAILURE,
     EVENT_SECOND_INSTANCE_BLOCKED,
+    EVENT_SECOND_ACCOUNT_INSTANCE_BLOCKED,
     EVENT_SUBMIT_UNKNOWN,
 )
 from models.task_state import (
@@ -679,6 +681,7 @@ def run(config: ConfigManager,
 
     results: List[Dict[str, Any]] = []
     pusher = None
+    account_lock = None  # Stage 7: 账户级运行锁（finally 统一释放）
     started_at = datetime.now().strftime("%H:%M:%S")
     start_dt = datetime.now()
     user_key = "unknown"
@@ -722,6 +725,26 @@ def run(config: ConfigManager,
                         "message": reason or "已禁用",
                         "task_type": TASK_LABELS[key],
                     })
+                return results
+
+            # Stage 7: 账户级运行锁——A+A BLOCK / A+B 并行正常
+            account_lock = AccountRunLock(
+                default_account_lock_path(context.account_id,
+                                          data_dir=DATA_DIR),
+                context.account_id)
+            if not account_lock.acquire():
+                record_event(user_key, "调度",
+                             EVENT_SECOND_ACCOUNT_INSTANCE_BLOCKED,
+                             stage="startup", action="跳过本轮",
+                             result="另一实例持有该账户运行锁")
+                if state_store:
+                    state_store.mark(user_key, "账户锁", "SKIPPED",
+                                     "该账户已有实例在运行")
+                results.append({
+                    "status": "skip",
+                    "message": "该账户已有实例在运行（账户锁）",
+                    "task_type": "账户锁",
+                })
                 return results
 
         # L5: 启动前只读预检（0 次业务请求 + 至多 1 次 TCP 探测），
@@ -839,6 +862,11 @@ def run(config: ConfigManager,
             {"status": "fail", "message": error_message, "task_type": "系统错误"}
         )
     finally:
+        if account_lock is not None:
+            try:
+                account_lock.release()
+            except Exception as e:  # 释放失败不阻断收尾（OS 兜底）
+                logger.warning(f"账户锁释放异常: {e}")
         if pusher:
             try:
                 pusher.push(results)
