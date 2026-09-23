@@ -78,6 +78,23 @@ def _risk_path(risk_dir: str, date: str) -> str:
     return os.path.join(risk_dir, f"{date}.json")
 
 
+# ---------- Stage 3: 线程级风险目录路由 ----------
+# run() 在账户线程入口设置 set_active_risk_dir(context.risk_dir)，线程内
+# 所有任务函数的 record_event 调用自动落入该账户的 risk/ 目录，无需逐层
+# 透传。注意：这是目录路由覆盖，不是身份来源——user_key 始终显式传参；
+# 同账户不同轮次运行在不同线程（ThreadPoolExecutor），互不干扰。
+_active_risk_dir = threading.local()
+
+
+def set_active_risk_dir(directory: Optional[str]) -> None:
+    """绑定当前线程的风险事件目录（账户级隔离路由）。"""
+    _active_risk_dir.value = directory
+
+
+def get_active_risk_dir() -> Optional[str]:
+    return getattr(_active_risk_dir, "value", None)
+
+
 def _load(path: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -112,7 +129,9 @@ def record_event(
         return
     try:
         day = date or datetime.now().strftime("%Y-%m-%d")
-        directory = risk_dir or DEFAULT_RISK_DIR
+        # 优先级：显式 risk_dir > 线程级账户目录（Stage 3 路由）> 全局默认
+        directory = (risk_dir or get_active_risk_dir()
+                     or DEFAULT_RISK_DIR)
         path = _risk_path(directory, day)
         entry = {
             "time": datetime.now().strftime("%H:%M:%S"),

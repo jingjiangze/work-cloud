@@ -26,6 +26,7 @@ from models.execution_history import append_entry
 from util.preflight import run_preflight
 from models.risk_ledger import (
     record_event,
+    set_active_risk_dir,
     EVENT_CAPTCHA_CIRCUIT_BREAK,
     EVENT_DUPLICATE_PREVENTED,
     EVENT_AUTH_FAILURE,
@@ -679,8 +680,16 @@ def run(config: ConfigManager,
     try:
         pusher = MessagePusher(config.get_value("config.pushNotifications"))
 
-        state_store = TaskStateStore()
-        user_key = derive_user_key(config)
+        # Stage 3: 账户级运行目录隔离——有 context 时状态/历史/风险全部
+        # 落入 data/accounts/{account_id}/，主键使用稳定 account_id；
+        # 无 context（legacy）路径行为与旧版完全一致
+        if context:
+            state_store = TaskStateStore(data_dir=context.state_dir)
+            user_key = context.user_key
+            set_active_risk_dir(context.risk_dir)
+        else:
+            state_store = TaskStateStore()
+            user_key = derive_user_key(config)
 
         # L5: 启动前只读预检（0 次业务请求 + 至多 1 次 TCP 探测），
         # 关键条件不满足直接 STOP，不带着必败状态发起登录/提交
@@ -769,9 +778,15 @@ def run(config: ConfigManager,
             f"执行结束：{desensitize_name(config.get_value('userInfo.nikeName'))}"
         )
         _log_ctx.tag = "-"
-        # Stage 10: 每日执行历史台账
-        append_entry(user_key, results, started_at,
-                     (datetime.now() - start_dt).total_seconds())
+        # Stage 10: 每日执行历史台账（Stage 3: 账户级 history/ 目录）
+        if context:
+            append_entry(user_key, results, started_at,
+                         (datetime.now() - start_dt).total_seconds(),
+                         history_dir=context.history_dir)
+            set_active_risk_dir(None)  # 解绑线程级风险目录路由
+        else:
+            append_entry(user_key, results, started_at,
+                         (datetime.now() - start_dt).total_seconds())
         return results
 
 
