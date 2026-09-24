@@ -293,6 +293,101 @@ def perform_add_account(phone: str, password: str,
             "message": "账号已添加（打卡已开启，位置信息请在该账号配置中补填）"}, 200
 
 
+# Stage 15: AI/报告配置更新（写回 user/{config_file}，与执行器共用文件）
+_config_write_lock = threading.Lock()
+
+
+def _account_ai_report_state(config_file: str) -> dict:
+    """读取 user/{config_file} 的 AI/报告配置状态（不返回 apikey 明文）。"""
+    state = {"ai_configured": False, "ai_model": "", "ai_apiurl": "",
+             "daily_enabled": False, "weekly_enabled": False,
+             "monthly_enabled": False}
+    if not _ACCOUNT_ID_RE.match(str(config_file or "")) and \
+            not re.match(r"^[\w\-]+\.json$", str(config_file or "")):
+        return state
+    path = os.path.join(PROJECT, "user", os.path.basename(config_file))
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = (json.load(f) or {}).get("config") or {}
+    except (OSError, json.JSONDecodeError):
+        return state
+    ai = cfg.get("ai") or {}
+    state["ai_configured"] = bool(ai.get("apikey"))
+    state["ai_model"] = ai.get("model", "")
+    state["ai_apiurl"] = ai.get("apiUrl", "")
+    rs = cfg.get("reportSettings") or {}
+    for k in ("daily", "weekly", "monthly"):
+        state[f"{k}_enabled"] = bool((rs.get(k) or {}).get("enabled"))
+    return state
+
+
+def _mask_key(key: str) -> str:
+    return (key[:6] + "…" + key[-4:]) if len(key) > 12 else "已设置"
+
+
+def perform_update_account_config(account_id: str, payload: dict) -> tuple:
+    """更新账户的 AI apikey/模型/接口 与 日报/周报/月报开关（写 user/*.json）。
+
+    payload 可选键：ai_apikey / ai_model / ai_apiurl /
+    daily_enabled / weekly_enabled / monthly_enabled。
+    至少提供一个键，否则 400。审计不记录 apikey 明文。
+    """
+    if not _ACCOUNT_ID_RE.match(str(account_id or "")):
+        return {"error": "invalid account id"}, 400
+    account = account_registry.get_account(account_id)
+    if account is None:
+        return {"error": "account not found"}, 404
+
+    allowed_ai = {"ai_apikey": "apikey", "ai_model": "model",
+                  "ai_apiurl": "apiUrl"}
+    allowed_flags = {"daily_enabled": "daily", "weekly_enabled": "weekly",
+                     "monthly_enabled": "monthly"}
+    keys = [k for k in list(allowed_ai) + list(allowed_flags) if k in payload]
+    if not keys:
+        return {"error": "没有需要更新的字段"}, 400
+
+    path = os.path.join(PROJECT, "user", account.config_file)
+    if not os.path.isfile(path):
+        return {"error": "配置文件不存在: " + account.config_file}, 404
+    try:
+        with _config_write_lock:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cfg = data.get("config") or {}
+            changed = {"ai": False, "report": False}
+            masked = {}
+            for k in keys:
+                if k in allowed_ai:
+                    value = str(payload.get(k) or "").strip()
+                    if k == "ai_apikey" and not value:
+                        return {"error": "apikey 不能为空"}, 400
+                    ai = cfg.setdefault("ai", {})
+                    ai[allowed_ai[k]] = value
+                    if k == "ai_apikey":
+                        masked["apikey"] = _mask_key(value)
+                    changed["ai"] = True
+                else:
+                    enabled = bool(payload.get(k))
+                    rs = cfg.setdefault("reportSettings", {})
+                    rs.setdefault(allowed_flags[k], {})["enabled"] = enabled
+                    changed["report"] = True
+            # 预检口径同步：开启了 weekly/monthly 就必须有 apikey
+            for rep in ("weekly", "monthly"):
+                if (cfg.get("reportSettings", {}).get(rep, {})
+                        .get("enabled")) and not (cfg.get("ai", {})
+                                                  .get("apikey")):
+                    return {"error": f"开启{rep}需要先填写 AI apikey"}, 400
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"error": f"配置文件读写失败: {exc}"}, 500
+
+    _append_audit("update_account_config", account_id, {
+        "fields": keys, **masked})
+    return {"ok": True, "account_id": account_id,
+            "message": "配置已保存，下轮执行生效"}, 200
+
+
 def _new_session() -> str:
     token = secrets.token_urlsafe(24)
     csrf = secrets.token_urlsafe(24)
@@ -593,6 +688,7 @@ def build_account_detail(account_id: str):
             "config_file": acc.get("config_file", ""),
             "task_policy": acc.get("task_policy"),
             "schedule_profile": acc.get("schedule_profile"),
+            **_account_ai_report_state(acc.get("config_file", "")),
         },
         "today": {
             "date": today,
@@ -771,6 +867,32 @@ class Handler(BaseHTTPRequestHandler):
                 action = str(payload.get("action", ""))
             resp, code = perform_account_action(m.group(1), action,
                                                 payload if isinstance(payload, dict) else {})
+            self._json(resp, code)
+            return
+
+        # Stage 15: AI/报告配置面板（apikey 与周报/月报开关）
+        m2 = re.match(r"^/api/accounts/(acct_[A-Za-z0-9]{6,16})/config$",
+                      parsed.path)
+        if m2:
+            cookie_token = _parse_cookie(self.headers.get("Cookie", ""))
+            if not _valid_session(cookie_token):
+                self._json({"error": "not authenticated"}, 401)
+                return
+            if not _csrf_valid(cookie_token,
+                               self.headers.get("X-CSRF-Token", "")):
+                _append_audit("csrf_rejected", m2.group(1),
+                              {"path": parsed.path})
+                self._json({"error": "csrf token missing or invalid"}, 403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                body = self.rfile.read(min(length, 65536)).decode("utf-8")
+                payload = json.loads(body) if body.strip() else {}
+            except (ValueError, OSError):
+                self._json({"error": "invalid json body"}, 400)
+                return
+            resp, code = perform_update_account_config(
+                m2.group(1), payload if isinstance(payload, dict) else {})
             self._json(resp, code)
             return
 

@@ -180,6 +180,18 @@
         </div>
       </div>
     </div>
+    <div class="card"><h2>AI / 报告设置</h2>
+      <div class="meta" style="margin-bottom:8px">周报/月报由 AI 生成，需要 apikey（OpenAI 兼容接口）；日报不需要</div>
+      <label class="lbl" style="display:block;margin:6px 0 4px">AI apikey <span class="meta" id="ai-key-state"></span></label>
+      <input id="ai-key" type="password" placeholder="sk-..." style="width:100%;max-width:560px;box-sizing:border-box;padding:8px;font-family:monospace">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin:10px 0">
+        <label><input type="checkbox" id="rep-daily"> 日报提交</label>
+        <label><input type="checkbox" id="rep-weekly"> 周报提交</label>
+        <label><input type="checkbox" id="rep-monthly"> 月报提交</label>
+      </div>
+      <button class="btn" onclick="saveAiConfig()">保存 AI / 报告设置</button>
+      <span class="meta" style="margin-left:8px">保存即写入该账号配置文件，下轮执行生效</span>
+    </div>
     <div class="card"><h2>今日任务</h2><div id="detail-today"></div></div>
     <div class="card"><h2>最近 7 天</h2><div class="daybar" id="detail-bars"></div>
       <div id="detail-series" style="margin-top:8px"></div></div>
@@ -310,6 +322,30 @@ async function savePolicy(){
   await accountAction(id, "set_task_policy", {task_policy: policy});
 }
 
+async function saveAiConfig(){
+  const id = decodeURIComponent(location.pathname.split("/").pop() || "");
+  if (!id.startsWith("acct_")) return;
+  if (!CSRF) await initCsrf();
+  actMsg("保存中…", true);
+  const payload = {
+    ai_apikey: document.getElementById("ai-key").value.trim(),
+    weekly_enabled: document.getElementById("rep-weekly").checked,
+    monthly_enabled: document.getElementById("rep-monthly").checked,
+    daily_enabled: document.getElementById("rep-daily").checked,
+  };
+  const resp = await fetch(`/api/accounts/${id}/config`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-CSRF-Token": CSRF},
+    body: JSON.stringify(payload),
+  });
+  let body = {};
+  try { body = await resp.json(); } catch {}
+  if (resp.status === 401) { location.href = "/login"; return; }
+  if (resp.status === 403) { await initCsrf(); actMsg("CSRF 校验失败，已刷新令牌，请重试", false); return; }
+  actMsg(body.message || body.error || (resp.ok ? "已保存" : "失败"), resp.ok);
+  if (resp.ok) showAccountDetail(id);
+}
+
 function badge(state){
   const [cls, label] = STATUS_MAP[state] || ["b-skip", state||"-"];
   return `<span class="badge ${cls}">${esc(label)}</span>`;
@@ -418,6 +454,13 @@ async function showAccountDetail(id){
     <div class="kv"><span class="k">调度窗口</span><span>${p.schedule_profile?esc(JSON.stringify(p.schedule_profile)):"未设置（使用全局窗口）"}</span></div>`;
   renderActions(p);
   actMsg("");
+  // Stage 15: AI / 报告设置面板回填
+  const ks = document.getElementById("ai-key-state");
+  if (ks) ks.textContent = p.ai_configured ? "（已配置）" : "（未配置——开启周报/月报前必须填写）";
+  const setc = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+  setc("rep-daily", p.daily_enabled); setc("rep-weekly", p.weekly_enabled);
+  setc("rep-monthly", p.monthly_enabled);
+  const ki = document.getElementById("ai-key"); if (ki) ki.value = "";
 
   const today = d.today;
   document.getElementById("detail-today").innerHTML = (today.tasks.length || today.ledger_runs.length)
