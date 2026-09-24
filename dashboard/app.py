@@ -202,6 +202,97 @@ def perform_account_action(account_id: str, action: str,
     return {"error": f"unknown action: {action}"}, 400
 
 
+def _default_account_config(phone: str, password: str) -> dict:
+    """新账号默认配置（登录验证通过后落盘 user/{user_key}.json）。
+
+    打卡开启（位置信息待用户补填后才会真正打卡成功）；报告默认关闭
+    （AI apikey 未配置时预检会拦截整轮执行）。
+    """
+    return {"config": {
+        "user": {"phone": phone, "password": password},
+        "clockIn": {
+            "enabled": True, "mode": "daily",
+            "location": {"address": "", "latitude": "", "longitude": "",
+                         "province": "", "city": "", "area": ""},
+            "imageCount": 0,
+            "description": ["今日实习工作正常开展", "按时到岗，完成日常工作",
+                            "完成今日岗位任务", "按计划开展实习工作"],
+            "specialClockIn": False, "customDays": [1, 2, 3, 4, 5],
+        },
+        "reportSettings": {
+            "daily": {"enabled": False, "imageCount": 0},
+            "weekly": {"enabled": False, "imageCount": 0, "submitTime": 5},
+            "monthly": {"enabled": False, "imageCount": 0, "submitTime": 28},
+        },
+        "ai": {"model": "gpt-4o-mini", "apikey": "",
+               "apiUrl": "https://api.openai.com/"},
+        "pushNotifications": [],
+        "device": {"brand": "TA J20", "systemVersion": "17",
+                   "Platform": "Android", "isPhysical": True},
+    }}
+
+
+def perform_add_account(phone: str, password: str,
+                        display_name: str = "") -> tuple:
+    """网页添加工学云账号：真实登录验证 → 写配置文件 → 注册。
+
+    返回 (response_dict, http_code)。登录验证直接复用项目主流程
+    （ApiClient.login，含滑块验证码 OCR），失败即拒绝入库。
+    """
+    phone = str(phone or "").strip()
+    password = str(password or "")
+    if not re.match(r"^1\d{10}$", phone):
+        return {"error": "手机号格式不正确"}, 400
+    if not password:
+        return {"error": "密码不能为空"}, 400
+
+    # 查重：同手机号已注册则拒绝（注册表 config_file 对应 user/*.json）
+    for acc in account_registry.list_accounts():
+        if os.path.splitext(acc.config_file)[0] == phone or \
+                acc.display_name == (display_name or phone):
+            return {"error": "该账号已存在", "account_id": acc.account_id}, 409
+
+    from util.Config import ConfigManager
+    from models.task_state import derive_user_key
+
+    cfg = _default_account_config(phone, password)
+    cm = ConfigManager(config=cfg)
+    try:
+        from coreApi.MainLogicApi import ApiClient
+        api = ApiClient(cm)
+        api.login()  # 真实登录（AES + 滑块验证码 OCR），失败抛异常
+        try:
+            api.fetch_internship_plan()
+        except Exception:
+            pass  # 计划获取失败不阻断入库
+    except Exception as exc:
+        _append_audit("add_account_rejected", phone,
+                      {"reason": str(exc)[:200]})
+        return {"error": f"登录验证失败: {str(exc)[:160]}"}, 401
+
+    user_key = derive_user_key(cm)
+    user_dir = os.path.join(PROJECT, "user")
+    os.makedirs(user_dir, exist_ok=True)
+    config_file = f"{user_key}.json"
+    with open(os.path.join(user_dir, config_file), "w",
+              encoding="utf-8") as f:
+        json.dump(cm._config, f, ensure_ascii=False, indent=2)
+
+    account = account_registry.get_or_register_by_config(
+        config_file, display_name=display_name or phone)
+    if account is None:
+        return {"error": "注册失败（配置文件未被扫描）"}, 500
+    if display_name:
+        account_registry.update_account(account.account_id,
+                                        display_name=display_name)
+    _append_audit("add_account", account.account_id,
+                  {"phone": phone[:3] + "****" + phone[-4:],
+                   "config_file": config_file})
+    return {"ok": True, "account_id": account.account_id,
+            "display_name": display_name or phone,
+            "message": "账号已添加（打卡已开启，位置信息请在该账号配置中补填）"}, 200
+
+
 def _new_session() -> str:
     token = secrets.token_urlsafe(24)
     csrf = secrets.token_urlsafe(24)
@@ -680,6 +771,34 @@ class Handler(BaseHTTPRequestHandler):
                 action = str(payload.get("action", ""))
             resp, code = perform_account_action(m.group(1), action,
                                                 payload if isinstance(payload, dict) else {})
+            self._json(resp, code)
+            return
+
+        # Stage 14: 网页添加工学云账号（真实登录验证，可能耗时 10-40 秒）
+        if parsed.path == "/api/accounts/add":
+            cookie_token = _parse_cookie(self.headers.get("Cookie", ""))
+            if not _valid_session(cookie_token):
+                self._json({"error": "not authenticated"}, 401)
+                return
+            if not _csrf_valid(cookie_token,
+                               self.headers.get("X-CSRF-Token", "")):
+                _append_audit("csrf_rejected", "add_account",
+                              {"path": parsed.path})
+                self._json({"error": "csrf token missing or invalid"}, 403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                body = self.rfile.read(min(length, 65536)).decode("utf-8")
+                payload = json.loads(body) if body.strip() else {}
+            except (ValueError, OSError):
+                self._json({"error": "invalid json body"}, 400)
+                return
+            if not isinstance(payload, dict):
+                self._json({"error": "invalid json body"}, 400)
+                return
+            resp, code = perform_add_account(
+                payload.get("phone"), payload.get("password"),
+                str(payload.get("display_name") or ""))
             self._json(resp, code)
             return
 

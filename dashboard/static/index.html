@@ -119,8 +119,27 @@
   <!-- ============ 总览视图 ============ -->
   <div id="overview-view">
     <div class="card">
-      <h2>账户总览 <span class="meta" id="acct-date"></span></h2>
+      <h2>账户总览 <span class="meta" id="acct-date"></span>
+        <button class="btn" style="float:right" onclick="showAddModal()">＋ 添加账号</button></h2>
       <div class="stat-row" id="acct-stats"></div>
+    </div>
+
+    <div id="add-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99;align-items:center;justify-content:center">
+      <div class="card" style="max-width:420px;width:92%;margin:auto">
+        <h2>添加工学云账号</h2>
+        <div class="meta" style="margin-bottom:10px">将用该账号真实登录工学云验证（约 10~40 秒），通过后自动注册并开启打卡</div>
+        <label class="lbl" style="display:block;margin:8px 0 4px">手机号</label>
+        <input id="add-phone" type="tel" maxlength="11" placeholder="工学云登录手机号" style="width:100%;box-sizing:border-box;padding:8px">
+        <label class="lbl" style="display:block;margin:8px 0 4px">密码</label>
+        <input id="add-password" type="password" placeholder="工学云登录密码" style="width:100%;box-sizing:border-box;padding:8px">
+        <label class="lbl" style="display:block;margin:8px 0 4px">备注名（可选）</label>
+        <input id="add-name" type="text" placeholder="例如：张三" style="width:100%;box-sizing:border-box;padding:8px">
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+          <button class="btn" id="add-submit" onclick="submitAdd()">登录并添加</button>
+          <button class="btn" onclick="hideAddModal()">取消</button>
+          <span id="add-msg" class="meta"></span>
+        </div>
+      </div>
     </div>
 
     <div class="grid" id="acct-cards">
@@ -185,6 +204,51 @@ const RISK_LABEL = {
   SECOND_INSTANCE_BLOCKED:"并发拦截",
   SECOND_ACCOUNT_INSTANCE_BLOCKED:"账户并发拦截",
 };
+
+/* ============ Stage 14: 网页添加工学云账号 ============ */
+function showAddModal(){
+  document.getElementById("add-modal").style.display = "flex";
+  actMsg0("");
+  setTimeout(()=>document.getElementById("add-phone").focus(), 50);
+}
+function hideAddModal(){
+  document.getElementById("add-modal").style.display = "none";
+  document.getElementById("add-msg").textContent = "";
+}
+function actMsg0(text){
+  document.getElementById("add-msg").textContent = text || "";
+  document.getElementById("add-msg").style.color = text.startsWith("✓") ? "var(--green)" : "var(--orange)";
+}
+async function submitAdd(){
+  const phone = document.getElementById("add-phone").value.trim();
+  const password = document.getElementById("add-password").value;
+  const display_name = document.getElementById("add-name").value.trim();
+  if (!/^1\d{10}$/.test(phone)) { actMsg0("手机号格式不正确"); return; }
+  if (!password) { actMsg0("请输入密码"); return; }
+  if (!CSRF) await initCsrf();
+  const btn = document.getElementById("add-submit");
+  btn.disabled = true; actMsg0("正在真实登录工学云验证（约 10~40 秒，请勿关闭）…");
+  try {
+    const r = await fetch("/api/accounts/add", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": CSRF},
+      body: JSON.stringify({phone, password, display_name}),
+    });
+    const body = await r.json();
+    if (r.status === 401) { location.href = "/login"; return; }
+    if (r.ok) {
+      actMsg0("✓ " + (body.message || "添加成功"));
+      setTimeout(() => { hideAddModal(); loadAccounts(); }, 1200);
+    } else {
+      actMsg0(body.error || ("失败(" + r.status + ")"));
+    }
+  } catch (e) {
+    actMsg0("请求失败: " + e.message);
+  } finally {
+    btn.disabled = false;
+    document.getElementById("add-password").value = "";
+  }
+}
 
 function esc(s){ return String(s??"").replace(/[&<>"]/g,
   c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
