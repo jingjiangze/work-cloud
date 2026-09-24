@@ -45,6 +45,26 @@ def _parse_hhmm(text):
     return sched.parse_hhmm(text)
 
 
+# ---- Stage 13: 跨账户每日聚合摘要 ----
+_digest_sent_date: Optional[str] = None
+
+
+def _maybe_push_digest(now: datetime) -> None:
+    """当日计划全部完成后推送一次聚合摘要（每天至多一次，best-effort）。"""
+    global _digest_sent_date
+    from util import notification_digest
+    day = now.strftime("%Y-%m-%d")
+    if _digest_sent_date == day:
+        return
+    _digest_sent_date = day  # 无论成败，当天不再重试（避免重复轰炸）
+    push_config = notification_digest.load_digest_push_config()
+    if not push_config:
+        return
+    accounts_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data", "accounts")
+    notification_digest.push_daily_digest(push_config, accounts_dir, day)
+
+
 def get_next_run_time(now: datetime,
                       times: List[datetime]) -> Optional[datetime]:
     for run_at in times:
@@ -124,7 +144,10 @@ def run_loop(selected_files: Optional[List[str]]):
                 next_run = t
 
         if not next_run:
-            # 当日全部执行完 → 准备下一天
+            # 当日全部执行完 → 发跨账户聚合摘要（每天至多一次，
+            # 仅当 WK_DIGEST_PUSH 配置了启用渠道；best-effort）
+            _maybe_push_digest(now)
+            # 准备下一天
             current_day = now.date() + timedelta(days=1)
             rebuild(current_day)
             continue

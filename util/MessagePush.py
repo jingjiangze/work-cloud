@@ -85,6 +85,34 @@ class MessagePusher:
                     logger.error(f"{service_type} 消息推送失败: {str(e)}")
                     continue
 
+    def push_custom(self, title: str, markdown: str, html: str = None,
+                    level: str = "INFO") -> None:
+        """推送自定义内容（Stage 13: 跨账户聚合摘要等场景）。
+
+        Args:
+            title: 消息标题。
+            markdown: Markdown 正文（NotifyX/Server/AnPush 使用）。
+            html: HTML 正文（PushPlus/WxPusher/SMTP 使用）；None 时退回 markdown。
+            level: 通知等级 INFO/WARNING/ERROR。
+        """
+        html = html or markdown
+        for service_config in self.push_config:
+            if not service_config.get("enabled", False):
+                continue
+            service_type = service_config["type"]
+            try:
+                if service_type in ("NotifyX", "Server", "AnPush"):
+                    getattr(self, f"_{service_type.lower()}_push")(
+                        service_config, title, markdown)
+                elif service_type in ("PushPlus", "WxPusher", "SMTP"):
+                    getattr(self, f"_{service_type.lower()}_push")(
+                        service_config, title, html)
+                else:
+                    logger.warning(f"不支持的推送服务类型: {service_type}")
+            except Exception as e:
+                logger.error(f"{service_type} 消息推送失败: {str(e)}")
+                continue
+
     def _server_push(self, config: dict[str, Any], title: str, content: str):
         """Server酱 推送
 
