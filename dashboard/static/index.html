@@ -316,12 +316,26 @@ function badge(state){
 }
 
 /* ============ 账户总览 ============ */
+/* 带超时与错误兜底的 GET（Stage 14：公网经 Cloudflare，偶发挑战/抖动
+   不再让页面永远停在"加载中"） */
+async function fetchJSON(url, timeoutMs = 20000){
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, {signal: ctrl.signal});
+    if (r.status === 401) { location.href = "/login"; throw new Error("未登录"); }
+    if (!r.ok) throw new Error("HTTP " + r.status + "（可能被防火墙/CDN 拦截，请稍后重试）");
+    const text = await r.text();
+    try { return JSON.parse(text); }
+    catch { throw new Error("响应非 JSON（可能被 CDN 挑战页替换），请刷新重试"); }
+  } finally { clearTimeout(timer); }
+}
+
 async function loadAccounts(){
-  const r = await fetch("/api/accounts");
-  if (r.status === 401) { location.href = "/"; return; }
-  const data = await r.json();
-  document.getElementById("srv-time").textContent = data.server_time;
-  document.getElementById("acct-date").textContent = `(${data.date})`;
+  try {
+    const data = await fetchJSON("/api/accounts");
+    document.getElementById("srv-time").textContent = data.server_time;
+    document.getElementById("acct-date").textContent = `(${data.date})`;
 
   const c = data.counts;
   document.getElementById("acct-stats").innerHTML = [
@@ -354,6 +368,11 @@ async function loadAccounts(){
       <div class="last-run">最近运行: ${lastRun}</div>
     </div>`;
   }).join("");
+  } catch (e) {
+    document.getElementById("acct-cards").innerHTML =
+      `<div class="card empty">加载失败: ${esc(e.message)}<br>
+       <button class="btn" onclick="loadAccounts()" style="margin-top:8px">重试</button></div>`;
+  }
 }
 
 /* ============ 账户详情 ============ */
@@ -374,15 +393,21 @@ function toggleView(detail){
 
 async function showAccountDetail(id){
   toggleView(true);
-  const r = await fetch(`/api/accounts/${id}`);
-  if (r.status === 401) { location.href = "/"; return; }
-  if (r.status === 404) {
+  let d;
+  try {
+    d = await fetchJSON(`/api/accounts/${id}`);
+  } catch (e) {
+    document.getElementById("detail-profile").innerHTML =
+      `<div class="empty">加载失败: ${esc(e.message)}<br>
+       <button class="btn" onclick="showAccountDetail('${esc(id)}')" style="margin-top:8px">重试</button></div>`;
+    return;
+  }
+  const p = d.profile;
+  if (!p) {
     document.getElementById("detail-profile").innerHTML =
       `<div class="empty">账户不存在: ${esc(id)}</div>`; return;
   }
-  const d = await r.json();
   document.getElementById("srv-time").textContent = d.server_time;
-  const p = d.profile;
   document.getElementById("detail-profile").innerHTML = `
     <h2>账户详情</h2>
     <div class="user-head"><span class="user-name">${esc(p.display_name)}</span>
@@ -401,7 +426,7 @@ async function showAccountDetail(id){
       + (today.ledger_runs.map(run=>`
         <div class="kv"><span class="k">${esc(run.started_at)} ${esc(run.run_id.slice(0,14))}…</span>
         <span>${badge(run.status.toUpperCase())} · ${run.tasks.map(t=>
-          `${esc(t.task_type)}${t.verification&&t.verification.verified===true?" ✓":(t.verification&&t.verification.verified===false?" ✗":(t.status==="unknown"?" ?":""))}`).join("，")}</span></div>`).join(""))
+          `${esc(t.task_type)}${t.verification&&t.verification.verified===true?" ✓":(t.verification&&t.verification.verified===false?" ✗":(t.status==="unknown"?" ?":""))}`).join("，")}</span></div>`).join("")))
     : `<div class="empty">今日未运行</div>`;
 
   const maxRuns = Math.max(1, ...d.daily_series.map(s=>s.runs));
