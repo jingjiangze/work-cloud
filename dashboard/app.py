@@ -2,7 +2,9 @@
 """work-cloud 本地看板（只读）。
 
 - 纯标准库实现（http.server），零第三方依赖，低占用；
-- 只读：仅读取 data/ 下的状态/台账/风险文件，不提供任何写操作或文件列举；
+- 只读为主：读取 data/ 下的状态/台账/风险文件；Stage 12 起提供**受控
+  写操作**（账户启用/停用、任务策略、立即运行）——必须携带与会话绑定
+  的 CSRF 令牌，且每个动作落审计台账（data/audit/）；
 - 绑定 127.0.0.1，公网暴露一律经 Cloudflare Tunnel；
 - 访问控制：登录页（密码表单）→ HttpOnly 会话 Cookie；
   密码存 dashboard/password.txt（可直接编辑更换，服务端只存 SHA-256）；
@@ -15,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -24,8 +27,13 @@ from urllib.parse import urlparse, parse_qs
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(ROOT)
+if PROJECT not in sys.path:
+    sys.path.insert(0, PROJECT)  # 供账户注册表/执行器导入项目模块
 DATA_DIR = os.path.join(PROJECT, "data")
 STATIC_DIR = os.path.join(ROOT, "static")
+
+# Stage 12: 管理动作经账户注册表写（注册表路径为项目内绝对路径，与调度器一致）
+from models import account_registry  # noqa: E402
 PASSWORD_FILE = os.path.join(ROOT, "password.txt")
 COOKIE_NAME = "wk_dashboard"
 SESSION_TTL = 12 * 3600
@@ -53,27 +61,177 @@ PASSWORD_HASH = _load_password_hash()
 _fail_lock = threading.Lock()
 _fail_count = 0
 
+# 会话：token -> {"exp": epoch, "csrf": str}（CSRF 与会话一一绑定）
 _sessions: dict = {}
 _sessions_lock = threading.Lock()
+
+# Stage 12: 账户管理动作审计（operator 全部为看板登录者 "operator"）
+AUDIT_DIR = os.path.join(DATA_DIR, "audit")
+_audit_lock = threading.Lock()
+
+# Stage 12: 看板内触发的执行任务（防重复点击）
+_run_in_progress: set = set()
+_run_progress_lock = threading.Lock()
+
+
+# ---------- Stage 12: 受控管理动作 ----------
+
+def _append_audit(action: str, account_id: str, detail: dict = None) -> dict:
+    """管理动作审计：data/audit/{date}.json 追加列表（best-effort，不抛异常）。"""
+    entry = {
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "action": str(action),
+        "account_id": str(account_id or ""),
+        "detail": detail or {},
+    }
+    try:
+        os.makedirs(AUDIT_DIR, exist_ok=True)
+        path = os.path.join(AUDIT_DIR,
+                            datetime.now().strftime("%Y-%m-%d") + ".json")
+        with _audit_lock:
+            data = _read_json(path)
+            if not isinstance(data, list):
+                data = []
+            data.append(entry)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+    return entry
+
+
+def load_audit(day: str, limit: int = 100) -> list:
+    """读某日审计（date=YYYY-MM-DD，严格格式校验）。"""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(day or "")):
+        return []
+    data = _read_json(os.path.join(AUDIT_DIR, f"{day}.json"))
+    if not isinstance(data, list):
+        return []
+    return data[-limit:]
+
+
+def _csrf_valid(session_token: str, header_token: str) -> bool:
+    """CSRF 令牌校验：必须存在且与会话一一绑定（恒定时间比较）。"""
+    expected = _session_csrf(session_token)
+    if not expected or not header_token:
+        return False
+    return hmac.compare_digest(expected, header_token)
+
+
+def _spawn_run(account) -> dict:
+    """拉起独立进程执行该账户任务（python main.py --file <stem>）。
+
+    与计划任务共用单实例运行锁（LocalRunLock）：若全局执行中，子进程
+    会立即退出并记风险事件——不会产生并发双重登录。
+    """
+    file_stem = os.path.splitext(account.config_file)[0]
+    key = f"{account.account_id}:{file_stem}"
+    with _run_progress_lock:
+        if key in _run_in_progress:
+            return {"ok": False, "message": "该账户已有一次手动运行进行中，请稍候"}
+        _run_in_progress.add(key)
+    try:
+        python = sys.executable or "python"
+        proc = subprocess.Popen(
+            [python, "main.py", "--file", file_stem],
+            cwd=PROJECT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return {"ok": True, "pid": proc.pid,
+                "message": f"已拉起执行进程（pid={proc.pid}，账户 {file_stem}）"}
+    except OSError as exc:
+        return {"ok": False, "message": f"拉起执行进程失败: {exc}"}
+    finally:
+        with _run_progress_lock:
+            _run_in_progress.discard(key)
+
+
+def perform_account_action(account_id: str, action: str,
+                           payload: dict = None,
+                           registry_path: str = None,
+                           user_dir: str = None) -> tuple:
+    """受控账户动作分发。返回 (response_dict, http_code)。
+
+    动作：enable / disable / set_task_policy / run。
+    registry_path / user_dir 仅测试注入用；生产用注册表默认路径。
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    if not _ACCOUNT_ID_RE.match(str(account_id or "")):
+        return {"error": "invalid account id"}, 400
+
+    kwargs = {}
+    if registry_path is not None:
+        kwargs["registry_path"] = registry_path
+    if user_dir is not None:
+        kwargs["user_dir"] = user_dir
+
+    if action in ("enable", "disable"):
+        fn = (account_registry.enable_account if action == "enable"
+              else account_registry.disable_account)
+        account = fn(account_id, **kwargs)
+        if account is None:
+            return {"error": "account not found"}, 404
+        _append_audit(action, account_id, {"enabled": account.enabled})
+        return {"ok": True, "account_id": account_id,
+                "enabled": account.enabled}, 200
+
+    if action == "set_task_policy":
+        account = account_registry.set_task_policy(
+            account_id, payload.get("task_policy"), **kwargs)
+        if account is None:
+            return {"error": "account not found"}, 404
+        _append_audit(action, account_id,
+                      {"task_policy": account.task_policy or {}})
+        return {"ok": True, "account_id": account_id,
+                "task_policy": account.task_policy or {}}, 200
+
+    if action == "run":
+        account = account_registry.get_account(account_id, **kwargs)
+        if account is None:
+            return {"error": "account not found"}, 404
+        result = _spawn_run(account)
+        _append_audit(action, account_id, result)
+        return ({"ok": True, **result}, 200) if result.get("ok") \
+            else ({"ok": False, "message": result.get("message", "")}, 409)
+
+    return {"error": f"unknown action: {action}"}, 400
 
 
 def _new_session() -> str:
     token = secrets.token_urlsafe(24)
+    csrf = secrets.token_urlsafe(24)
     with _sessions_lock:
-        # 清理过期会话
         now = datetime.now().timestamp()
-        expired = [t for t, exp in _sessions.items() if exp < now]
+        expired = [t for t, v in _sessions.items()
+                   if (v["exp"] if isinstance(v, dict) else v) < now]
         for t in expired:
             _sessions.pop(t, None)
-        _sessions[token] = now + SESSION_TTL
+        _sessions[token] = {"exp": now + SESSION_TTL, "csrf": csrf}
     return token
+
+
+def _session_csrf(token: str) -> str:
+    if not token:
+        return ""
+    with _sessions_lock:
+        v = _sessions.get(token)
+        if isinstance(v, dict) and v.get("exp", 0) > datetime.now().timestamp():
+            return v.get("csrf", "")
+        _sessions.pop(token, None)
+    return ""
 
 
 def _valid_session(token: str) -> bool:
     if not token:
         return False
     with _sessions_lock:
-        exp = _sessions.get(token)
+        v = _sessions.get(token)
+        exp = v.get("exp") if isinstance(v, dict) else v
         if exp and exp > datetime.now().timestamp():
             return True
         _sessions.pop(token, None)
@@ -465,6 +623,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(detail)
             return
 
+        if path == "/api/csrf":
+            token = _parse_cookie(self.headers.get("Cookie", ""))
+            csrf = _session_csrf(token)
+            if not csrf:
+                self._json({"error": "no session"}, 401)
+            else:
+                self._json({"csrf": csrf})
+            return
+
+        if path == "/api/audit":
+            day = parse_qs(parsed.query).get("date",
+                                             [datetime.now().strftime("%Y-%m-%d")])[0]
+            self._json({"date": day, "audit": load_audit(day)})
+            return
+
         if path == "/api/history":
             date = parse_qs(parsed.query).get("date",
                                               [datetime.now().strftime("%Y-%m-%d")])[0]
@@ -477,9 +650,42 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path != "/login":
-            self._send(404, b"not found", "text/plain")
+        if parsed.path == "/login":
+            self._do_login(parsed)
             return
+
+        # Stage 12: 管理动作——登录 + CSRF 双重校验（CSRF 与会话绑定）
+        m = re.match(r"^/api/accounts/(acct_[A-Za-z0-9]{6,16})/action$",
+                     parsed.path)
+        if m:
+            cookie_token = _parse_cookie(self.headers.get("Cookie", ""))
+            if not _valid_session(cookie_token):
+                self._json({"error": "not authenticated"}, 401)
+                return
+            if not _csrf_valid(cookie_token,
+                               self.headers.get("X-CSRF-Token", "")):
+                _append_audit("csrf_rejected", m.group(1), {
+                    "path": parsed.path})
+                self._json({"error": "csrf token missing or invalid"}, 403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                body = self.rfile.read(min(length, 65536)).decode("utf-8")
+                payload = json.loads(body) if body.strip() else {}
+            except (ValueError, OSError):
+                self._json({"error": "invalid json body"}, 400)
+                return
+            action = ""
+            if isinstance(payload, dict):
+                action = str(payload.get("action", ""))
+            resp, code = perform_account_action(m.group(1), action,
+                                                payload if isinstance(payload, dict) else {})
+            self._json(resp, code)
+            return
+
+        self._send(404, b"not found", "text/plain")
+
+    def _do_login(self, parsed):
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
             body = self.rfile.read(min(length, 8192)).decode("utf-8")

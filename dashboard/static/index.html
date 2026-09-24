@@ -149,6 +149,18 @@
   <!-- ============ 账户详情视图 ============ -->
   <div id="detail-view" style="display:none">
     <div class="card" id="detail-profile"></div>
+    <div class="card"><h2>账户操作</h2>
+      <div id="detail-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"></div>
+      <div style="margin-top:10px">
+        <label class="lbl" style="display:block;margin-bottom:4px">任务开关（JSON，留空表示跟随原配置旗标）</label>
+        <textarea id="policy-input" rows="3" style="width:100%;max-width:560px;font-family:monospace"
+          placeholder='{"checkin": true, "daily_report": false}'></textarea>
+        <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+          <button class="btn" onclick="savePolicy()">保存任务开关</button>
+          <span id="action-msg" class="meta"></span>
+        </div>
+      </div>
+    </div>
     <div class="card"><h2>今日任务</h2><div id="detail-today"></div></div>
     <div class="card"><h2>最近 7 天</h2><div class="daybar" id="detail-bars"></div>
       <div id="detail-series" style="margin-top:8px"></div></div>
@@ -176,6 +188,63 @@ const RISK_LABEL = {
 
 function esc(s){ return String(s??"").replace(/[&<>"]/g,
   c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+/* ============ Stage 12: 受控管理动作 ============ */
+let CSRF = "";
+async function initCsrf(){
+  try { const r = await fetch("/api/csrf"); if (r.ok) CSRF = (await r.json()).csrf; } catch {}
+}
+
+async function apiPost(accountId, payload){
+  const r = await fetch(`/api/accounts/${accountId}/action`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-CSRF-Token": CSRF},
+    body: JSON.stringify(payload),
+  });
+  let body = {};
+  try { body = await r.json(); } catch {}
+  return {code: r.status, ...body};
+}
+
+function actMsg(text, ok){
+  const el = document.getElementById("action-msg");
+  if (el) { el.textContent = text || ""; el.style.color = ok ? "var(--green)" : "var(--red)"; }
+}
+
+async function accountAction(accountId, action, extra){
+  if (!CSRF) await initCsrf();
+  actMsg("执行中…", true);
+  const r = await apiPost(accountId, {action, ...(extra||{})});
+  if (r.code === 401) { location.href = "/login"; return; }
+  if (r.code === 403) { await initCsrf(); actMsg("CSRF 校验失败，已刷新令牌，请重试", false); return; }
+  actMsg(r.message || (r.ok ? "成功" : (r.error || "失败")), r.ok === true);
+  if (r.ok) showAccountDetail(accountId);  // 刷新档案（启用状态/策略可能已变）
+}
+
+function renderActions(p){
+  const bar = document.getElementById("detail-actions");
+  if (!bar) return;
+  bar.innerHTML = `
+    <button class="btn" onclick="accountAction('${esc(p.account_id)}','run')">▶ 立即运行</button>
+    ${p.enabled
+      ? `<button class="btn" onclick="accountAction('${esc(p.account_id)}','disable')">⏸ 停用</button>`
+      : `<button class="btn" onclick="accountAction('${esc(p.account_id)}','enable')">✓ 启用</button>`}
+    <span class="meta">所有操作经 CSRF 校验并记入审计台账</span>`;
+  document.getElementById("policy-input").value =
+    p.task_policy ? JSON.stringify(p.task_policy, null, 1) : "";
+}
+
+async function savePolicy(){
+  const id = decodeURIComponent(location.pathname.split("/").pop() || "");
+  if (!id.startsWith("acct_")) return;
+  let policy = null;
+  const raw = document.getElementById("policy-input").value.trim();
+  if (raw) {
+    try { policy = JSON.parse(raw); }
+    catch (e) { actMsg("任务开关不是合法 JSON: " + e.message, false); return; }
+  }
+  await accountAction(id, "set_task_policy", {task_policy: policy});
+}
 
 function badge(state){
   const [cls, label] = STATUS_MAP[state] || ["b-skip", state||"-"];
@@ -258,6 +327,8 @@ async function showAccountDetail(id){
     <div class="kv"><span class="k">配置文件</span><span>${esc(p.config_file)}</span></div>
     <div class="kv"><span class="k">任务开关</span><span>${p.task_policy?esc(JSON.stringify(p.task_policy)):"未设置（跟随原配置旗标）"}</span></div>
     <div class="kv"><span class="k">调度窗口</span><span>${p.schedule_profile?esc(JSON.stringify(p.schedule_profile)):"未设置（使用全局窗口）"}</span></div>`;
+  renderActions(p);
+  actMsg("");
 
   const today = d.today;
   document.getElementById("detail-today").innerHTML = (today.tasks.length || today.ledger_runs.length)
@@ -421,6 +492,7 @@ function route(){
   if (m) { toggleView(true); showAccountDetail(m[1]); }
   else { toggleView(false); loadAccounts(); }
 }
+initCsrf();
 
 document.getElementById("datepick").addEventListener("change",
   e=>loadLegacy(e.target.value));
