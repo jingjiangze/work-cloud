@@ -181,6 +181,14 @@ def main():
     )
     args = parser.parse_args()
 
+    # 调度器单实例锁（Stage 12）：与执行锁（run.lock）分文件，防止
+    # 计划任务多重触发器拉起两个调度进程造成重复触发
+    from util.local_run_lock import LocalRunLock, default_lock_path
+    sched_lock = LocalRunLock(default_lock_path() + ".scheduler")
+    if not sched_lock.acquire():
+        logger.warning("检测到另一个调度器实例正在运行，本次启动退出")
+        return
+
     windows = load_windows()
     logger.info("调度器启动。全局触发窗口: " +
                 ", ".join(f"{s}-{e}" for s, e in windows))
@@ -188,6 +196,8 @@ def main():
         run_loop(args.file)
     except KeyboardInterrupt:
         logger.info("调度器已退出")
+    finally:
+        sched_lock.release()
 
 
 if __name__ == "__main__":
