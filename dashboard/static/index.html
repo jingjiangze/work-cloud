@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>work-cloud 执行看板</title>
+<title>work-cloud 多账户看板</title>
 <style>
   :root {
     --bg: #0f1420; --panel: #1a2130; --panel2: #212a3d; --border: #2c3650;
@@ -50,6 +50,8 @@
   .b-unknown { background: rgba(251,191,36,.15); color: var(--orange); }
   .b-skip    { background: rgba(107,114,128,.2);  color: var(--gray); }
   .b-running { background: rgba(96,165,250,.15);  color: var(--blue); }
+  .b-off     { background: rgba(107,114,128,.15); color: var(--gray); }
+  .b-on      { background: rgba(52,211,153,.12); color: var(--green); }
   .msg { color: var(--muted); font-size: 12px; margin-top: 6px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -70,40 +72,89 @@
   .chip { background: var(--panel2); border: 1px solid var(--border);
     border-radius: 8px; padding: 4px 10px; font-size: 12px; }
   .chip b { color: var(--orange); }
+  /* —— 账户卡片（Stage 11）—— */
+  .acct-card { cursor: pointer; transition: border-color .15s; }
+  .acct-card:hover { border-color: var(--accent); }
+  .acct-head { display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px; }
+  .acct-name { font-size: 15px; font-weight: 600; }
+  .acct-sub { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .mini-tasks { display: flex; gap: 6px; flex-wrap: wrap; }
+  .mini-tasks .badge { font-size: 11px; padding: 2px 8px; }
+  .last-run { color: var(--muted); font-size: 12px; margin-top: 10px;
+    border-top: 1px solid var(--border); padding-top: 8px; }
+  .back-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .kv { display: flex; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 13px; }
+  .kv .k { color: var(--muted); min-width: 110px; }
+  pre.policy { background: var(--panel2); border-radius: 8px; padding: 10px;
+    font-size: 12px; overflow-x: auto; color: var(--text); }
+  .daybar { display: flex; gap: 6px; align-items: flex-end; height: 70px;
+    padding: 6px 0; }
+  .daycol { flex: 1; display: flex; flex-direction: column; align-items: center;
+    gap: 4px; font-size: 11px; color: var(--muted); }
+  .bar { width: 70%; background: var(--panel2); border-radius: 4px 4px 0 0;
+    min-height: 3px; position: relative; }
+  .bar .seg { position: absolute; bottom: 0; width: 100%; border-radius: 3px; }
+  .seg.s-success { background: var(--green); }
+  .seg.s-failed  { background: var(--red); }
+  .seg.s-unknown { background: var(--orange); }
+  .seg.s-skipped { background: var(--gray); }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <div>
-      <h1><span class="dot">&#9679;</span> work-cloud 执行看板</h1>
+      <h1><span class="dot">&#9679;</span> work-cloud 多账户看板</h1>
       <div class="meta">服务器时间: <span id="srv-time">-</span> <span class="refresh-note">| <span class="spin"></span> 每 30 秒自动刷新</span></div>
     </div>
     <div class="controls">
+      <button id="back-btn" style="display:none" onclick="backToOverview()">&larr; 返回总览</button>
       <input type="date" id="datepick">
-      <button onclick="load()">查询</button>
-      <button onclick="loadToday()">今天</button>
+      <button onclick="loadLegacy()">旧数据查询</button>
       <button onclick="location.href='/logout'" title="退出登录">退出</button>
     </div>
   </header>
 
-  <div class="card" id="stats-card" style="display:none">
-    <h2>累计统计</h2>
-    <div class="stat-row" id="stats"></div>
+  <!-- ============ 总览视图 ============ -->
+  <div id="overview-view">
+    <div class="card">
+      <h2>账户总览 <span class="meta" id="acct-date"></span></h2>
+      <div class="stat-row" id="acct-stats"></div>
+    </div>
+
+    <div class="grid" id="acct-cards">
+      <div class="card empty">加载账户中…</div>
+    </div>
+
+    <div id="legacy-section" style="display:none">
+      <h2 style="font-size:13px;color:var(--muted);margin:14px 0 10px" id="day-title">旧版数据（per-user 文件）</h2>
+      <div class="card" id="stats-card" style="display:none">
+        <h2>累计统计</h2>
+        <div class="stat-row" id="stats"></div>
+      </div>
+      <div class="grid" id="users"></div>
+      <div class="card" style="margin-top:4px">
+        <h2>风险事件 <span class="meta" id="risk-date"></span></h2>
+        <div class="typechips" id="risk-chips"></div>
+        <div id="risk-table"></div>
+      </div>
+      <div class="card">
+        <h2>执行历史（该日台账）</h2>
+        <div id="history-table"></div>
+      </div>
+    </div>
   </div>
 
-  <h2 style="font-size:13px;color:var(--muted);margin:6px 0 10px" id="day-title">今日进度</h2>
-  <div class="grid" id="users"><div class="card empty">加载中…</div></div>
-
-  <div class="card" style="margin-top:4px">
-    <h2>风险事件 <span class="meta" id="risk-date"></span></h2>
-    <div class="typechips" id="risk-chips"></div>
-    <div id="risk-table"></div>
-  </div>
-
-  <div class="card">
-    <h2>执行历史（该日台账）</h2>
-    <div id="history-table"></div>
+  <!-- ============ 账户详情视图 ============ -->
+  <div id="detail-view" style="display:none">
+    <div class="card" id="detail-profile"></div>
+    <div class="card"><h2>今日任务</h2><div id="detail-today"></div></div>
+    <div class="card"><h2>最近 7 天</h2><div class="daybar" id="detail-bars"></div>
+      <div id="detail-series" style="margin-top:8px"></div></div>
+    <div class="card"><h2>最近错误</h2><div id="detail-errors"></div></div>
+    <div class="card"><h2>风险事件（近 7 天）</h2><div id="detail-risk"></div></div>
+    <div class="card"><h2>报告记录（近 7 天）</h2><div id="detail-reports"></div></div>
   </div>
 </div>
 
@@ -111,17 +162,16 @@
 const STATUS_MAP = {
   SUCCESS: ["b-success","成功"], FAILED: ["b-fail","失败"],
   UNKNOWN: ["b-unknown","未知"], SKIPPED: ["b-skip","跳过"],
-  RUNNING: ["b-running","执行中"],
-};
-const TASK_LABEL = {
-  login:"登录", checkin:"打卡", daily_report:"日报",
-  weekly_report:"周报", monthly_report:"月报",
+  RUNNING: ["b-running","执行中"], INIT: ["b-skip","待执行"],
+  LOGIN_SUCCESS: ["b-success","成功"], CHECKIN_SUCCESS: ["b-success","成功"],
+  REPORT_SUCCESS: ["b-success","成功"],
 };
 const RISK_LABEL = {
   CAPTCHA_REQUIRED:"验证码出现", CAPTCHA_CIRCUIT_BREAK:"验证码熔断",
   SUBMIT_UNKNOWN:"提交未知", NETWORK_RETRY:"网络重试",
   AUTH_FAILURE:"登录失败", DUPLICATE_PREVENTED:"已防重复",
   SECOND_INSTANCE_BLOCKED:"并发拦截",
+  SECOND_ACCOUNT_INSTANCE_BLOCKED:"账户并发拦截",
 };
 
 function esc(s){ return String(s??"").replace(/[&<>"]/g,
@@ -132,11 +182,143 @@ function badge(state){
   return `<span class="badge ${cls}">${esc(label)}</span>`;
 }
 
+/* ============ 账户总览 ============ */
+async function loadAccounts(){
+  const r = await fetch("/api/accounts");
+  if (r.status === 401) { location.href = "/"; return; }
+  const data = await r.json();
+  document.getElementById("srv-time").textContent = data.server_time;
+  document.getElementById("acct-date").textContent = `(${data.date})`;
+
+  const c = data.counts;
+  document.getElementById("acct-stats").innerHTML = [
+    ["账户总数", c.total], ["启用", c.enabled],
+    ["今日成功", c.success, "var(--green)"], ["今日失败", c.failed, "var(--red)"],
+    ["UNKNOWN", c.unknown, "var(--orange)"],
+    ["最近运行", data.last_run_time || "—"],
+  ].map(([l,v,color])=>`<div class="stat"><div class="num" ${color?`style="color:${color}"`:""}>${esc(v)}</div><div class="lbl">${l}</div></div>`).join("");
+
+  const box = document.getElementById("acct-cards");
+  if (!data.accounts.length) {
+    box.innerHTML = `<div class="card empty">注册表暂无账户（执行一轮后自动建表）</div>`;
+    return;
+  }
+  box.innerHTML = data.accounts.map(a => {
+    const mini = a.tasks.length
+      ? a.tasks.map(t=>`<span class="badge ${(STATUS_MAP[t.state]||["b-skip",t.state])[0]}" title="${esc(t.message)}">${esc(t.label)}</span>`).join("")
+      : `<span class="meta">今日无任务记录</span>`;
+    const lr = a.last_run;
+    const lastRun = lr
+      ? `${esc(lr.started_at)} · ${lr.duration_sec??"-"}s · ${badge(lr.status.toUpperCase())} <span class="meta" title="${esc(lr.run_id)}">${esc(lr.run_id.slice(0,18))}…</span>`
+      : "今日未运行";
+    const stateBadge = a.enabled
+      ? `<span class="badge b-on">启用</span>`
+      : `<span class="badge b-off">禁用</span>`;
+    return `<div class="card acct-card" onclick="openAccount('${esc(a.account_id)}')">
+      <div class="acct-head"><span class="acct-name">${esc(a.display_name)}</span>${stateBadge}</div>
+      <div class="acct-sub">${esc(a.account_id)}</div>
+      <div class="mini-tasks">${mini}</div>
+      <div class="last-run">最近运行: ${lastRun}</div>
+    </div>`;
+  }).join("");
+}
+
+/* ============ 账户详情 ============ */
+function openAccount(id){
+  history.pushState({acct:id}, "", `/account/${id}`);
+  showAccountDetail(id);
+}
+function backToOverview(){
+  history.pushState({}, "", "/");
+  toggleView(false);
+  loadAccounts();
+}
+function toggleView(detail){
+  document.getElementById("overview-view").style.display = detail ? "none" : "";
+  document.getElementById("detail-view").style.display = detail ? "" : "none";
+  document.getElementById("back-btn").style.display = detail ? "" : "none";
+}
+
+async function showAccountDetail(id){
+  toggleView(true);
+  const r = await fetch(`/api/accounts/${id}`);
+  if (r.status === 401) { location.href = "/"; return; }
+  if (r.status === 404) {
+    document.getElementById("detail-profile").innerHTML =
+      `<div class="empty">账户不存在: ${esc(id)}</div>`; return;
+  }
+  const d = await r.json();
+  document.getElementById("srv-time").textContent = d.server_time;
+  const p = d.profile;
+  document.getElementById("detail-profile").innerHTML = `
+    <h2>账户详情</h2>
+    <div class="user-head"><span class="user-name">${esc(p.display_name)}</span>
+      ${p.enabled?`<span class="badge b-on">启用</span>`:`<span class="badge b-off">禁用</span>`}</div>
+    <div class="kv"><span class="k">account_id</span><span>${esc(p.account_id)}</span></div>
+    <div class="kv"><span class="k">配置文件</span><span>${esc(p.config_file)}</span></div>
+    <div class="kv"><span class="k">任务开关</span><span>${p.task_policy?esc(JSON.stringify(p.task_policy)):"未设置（跟随原配置旗标）"}</span></div>
+    <div class="kv"><span class="k">调度窗口</span><span>${p.schedule_profile?esc(JSON.stringify(p.schedule_profile)):"未设置（使用全局窗口）"}</span></div>`;
+
+  const today = d.today;
+  document.getElementById("detail-today").innerHTML = (today.tasks.length || today.ledger_runs.length)
+    ? (today.tasks.map(t=>`<div class="task-row"><span class="task-name">${esc(t.label)}</span>${badge(t.state)}</div>
+        ${t.message?`<div class="msg" title="${esc(t.message)}">${esc(t.message)}</div>`:""}`).join("")
+      + (today.ledger_runs.map(run=>`
+        <div class="kv"><span class="k">${esc(run.started_at)} ${esc(run.run_id.slice(0,14))}…</span>
+        <span>${badge(run.status.toUpperCase())} · ${run.tasks.map(t=>
+          `${esc(t.task_type)}${t.verification&&t.verification.verified===true?" ✓":(t.verification&&t.verification.verified===false?" ✗":(t.status==="unknown"?" ?":""))}`).join("，")}</span></div>`).join(""))
+    : `<div class="empty">今日未运行</div>`;
+
+  const maxRuns = Math.max(1, ...d.daily_series.map(s=>s.runs));
+  document.getElementById("detail-bars").innerHTML = d.daily_series.map(s=>{
+    const H = 46;
+    const seg = (n, cls, bottom) => n
+      ? `<div class="seg ${cls}" style="height:${Math.max(2, n/maxRuns*H)}px;bottom:${bottom}px"></div>` : "";
+    const bottomU = Math.max(2, s.success/maxRuns*H);
+    const bottomS = bottomU + Math.max(2, s.failed/maxRuns*H);
+    return `<div class="daycol">
+      <div class="bar" style="height:${H}px">
+        ${seg(s.success, "s-success", 0)}
+        ${seg(s.failed, "s-failed", bottomU)}
+        ${seg(s.unknown, "s-unknown", bottomS)}
+      </div><span>${esc(s.date.slice(5))}</span></div>`;
+  }).join("");
+  document.getElementById("detail-series").innerHTML = `<table><tr><th>日期</th><th>轮次</th><th>成功</th><th>失败</th><th>未知</th><th>跳过</th></tr>` +
+    d.daily_series.map(s=>`<tr><td>${esc(s.date)}</td><td>${s.runs}</td>
+      <td style="color:var(--green)">${s.success}</td><td style="color:var(--red)">${s.failed}</td>
+      <td style="color:var(--orange)">${s.unknown}</td><td>${s.skipped}</td></tr>`).join("") + `</table>`;
+
+  document.getElementById("detail-errors").innerHTML = d.recent_errors.length
+    ? `<table><tr><th>日期</th><th>任务</th><th>错误</th><th>run_id</th></tr>` +
+      d.recent_errors.map(e=>`<tr><td>${esc(e.date)}</td><td>${esc(e.task_type)}</td>
+        <td class="msg" style="max-width:380px;white-space:normal" title="${esc(e.message)}">${esc(e.message)}</td>
+        <td class="meta">${esc(e.run_id.slice(0,18))}…</td></tr>`).join("") + `</table>`
+    : `<div class="empty">近 7 天无错误 ✓</div>`;
+
+  document.getElementById("detail-risk").innerHTML = d.risk_events.length
+    ? `<table><tr><th>日期</th><th>时间</th><th>任务</th><th>事件</th><th>动作</th><th>结果</th></tr>` +
+      d.risk_events.map((e,i)=>{
+        // 事件无日期字段，按聚合顺序展示；日期从分组还原
+        return `<tr><td>${esc(e._date||"")}</td><td>${esc(e.time)}</td><td>${esc(e.task)}</td>
+        <td>${RISK_LABEL[e.event_type]||esc(e.event_type)}</td><td>${esc(e.action)}</td>
+        <td class="msg" style="max-width:240px" title="${esc(e.result)}">${esc(e.result)}</td></tr>`;}).join("")
+      + `</table>`
+    : `<div class="empty">近 7 天无风险事件 ✓</div>`;
+
+  document.getElementById("detail-reports").innerHTML = d.reports.length
+    ? `<table><tr><th>report_id</th><th>类型</th><th>周期</th><th>生成时间</th><th>提交</th><th>验证</th></tr>` +
+      d.reports.map(r=>`<tr><td class="meta">${esc(r.report_id)}</td><td>${esc(r.report_type)}</td>
+        <td>${esc(r.period?.key||"-")}</td><td>${esc(r.generated_at)}</td>
+        <td>${badge((r.submit_status||"").toUpperCase())}</td>
+        <td>${r.verify_status===true?"✓":(r.verify_status===false?"✗":"-")}</td></tr>`).join("") + `</table>`
+    : `<div class="empty">近 7 天无报告记录</div>`;
+}
+
+/* ============ 旧版数据视图（per-user 文件兼容） ============ */
 function renderUsers(state, history){
   const box = document.getElementById("users");
   const histByUser = {};
   (history?.entries||[]).forEach(e => histByUser[e.user] = e);
-  // 合并：状态文件里的 user 键 + 台账里的 user 键
   const names = new Set([
     ...state.map(s => s.user || (s.userInfo||{}).userId || "?"),
     ...Object.keys(histByUser),
@@ -153,7 +335,7 @@ function renderUsers(state, history){
     ["login","checkin","daily_report","weekly_report","monthly_report"].forEach(k=>{
       const t = tasks[k];
       if (t) rows += `<div class="task-row">
-        <span class="task-name">${TASK_LABEL[k]||k}</span>
+        <span class="task-name">${esc(k)}</span>
         ${badge(t.state)} </div>
         ${t.message?`<div class="msg" title="${esc(t.message)}">${esc(t.message)}</div>`:""}`;
     });
@@ -212,36 +394,43 @@ function renderStats(stats){
     `<div class="stat"><div class="num">${esc(v)}</div><div class="lbl">${l}</div></div>`).join("");
 }
 
-async function load(date){
+async function loadLegacy(date){
+  document.getElementById("legacy-section").style.display = "";
   date = date || document.getElementById("datepick").value;
   const url = date ? `/api/history?date=${date}` : "/api/overview";
   const r = await fetch(url);
   if (r.status === 401) { location.href = "/"; return; }
   const data = await r.json();
   if (date) {
-    document.getElementById("day-title").textContent = `进度（${date}）`;
-    document.getElementById("srv-time").textContent = "-";
-    // 查历史日期：state 无单独接口，用 overview 的当日 state 不适用；仅渲染台账
+    document.getElementById("day-title").textContent = `旧版数据（${date}）`;
     document.getElementById("users").innerHTML = "";
     renderHistory(data.history);
     renderRisk(data.risk);
     return;
   }
-  document.getElementById("srv-time").textContent = data.server_time;
   renderUsers(data.state, data.history);
   renderRisk(data.risk);
   renderHistory(data.history);
   renderStats(data.statistics);
 }
 
-function loadToday(){
-  document.getElementById("datepick").value = "";
-  load();
+/* ============ 路由 ============ */
+window.addEventListener("popstate", () => route());
+function route(){
+  const m = location.pathname.match(/^\/account\/(acct_[A-Za-z0-9]{6,16})$/);
+  if (m) { toggleView(true); showAccountDetail(m[1]); }
+  else { toggleView(false); loadAccounts(); }
 }
 
-document.getElementById("datepick").addEventListener("change", e=>load(e.target.value));
-loadToday();
-setInterval(()=>{ if(!document.getElementById("datepick").value) load(); }, 30000);
+document.getElementById("datepick").addEventListener("change",
+  e=>loadLegacy(e.target.value));
+route();
+setInterval(()=>{ if (!document.getElementById("detail-view").style.display.includes("none"))
+    route();
+  else if (document.getElementById("legacy-section").style.display.includes("none"))
+    loadAccounts();
+  else loadLegacy();
+}, 30000);
 </script>
 </body>
 </html>

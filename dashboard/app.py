@@ -13,11 +13,12 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -159,6 +160,216 @@ def build_overview() -> dict:
     }
 
 
+# ---------- 多账户数据（Stage 11，只读） ----------
+
+ACCOUNTS_DIR = os.path.join(DATA_DIR, "accounts")
+_ACCOUNT_ID_RE = re.compile(r"^acct_[A-Za-z0-9]{6,16}$")
+
+# 状态文件里的各种键（中文标签/英文键并存）→ 看板统一标签
+_KEY2LABEL = {
+    "login": "登录", "checkin": "打卡", "打卡": "打卡",
+    "daily_report": "日报", "日报提交": "日报", "daily": "日报",
+    "weekly_report": "周报", "周报提交": "周报",
+    "monthly_report": "月报", "月报提交": "月报",
+    "账户锁": "账户锁",
+}
+_LABEL_ORDER = ["登录", "打卡", "日报", "周报", "月报", "账户锁"]
+
+
+def _account_base(account_id: str) -> str:
+    """账户数据目录（严格校验 ID 格式，防目录穿越）。"""
+    if not _ACCOUNT_ID_RE.match(str(account_id or "")):
+        return ""
+    return os.path.join(ACCOUNTS_DIR, account_id)
+
+
+def _registry_accounts() -> list:
+    reg = _read_json(os.path.join(ACCOUNTS_DIR, "index.json")) or {}
+    return [a for a in reg.get("accounts", []) if isinstance(a, dict)]
+
+
+def _canonical_tasks(state_payload: dict) -> list:
+    """状态快照 → 统一标签任务列表（顺序稳定，后写覆盖先写）。"""
+    tasks = (state_payload or {}).get("tasks") or {}
+    merged = {}
+    for key, info in tasks.items():
+        label = _KEY2LABEL.get(key)
+        if not label or not isinstance(info, dict):
+            continue
+        merged[label] = {"state": info.get("state", ""),
+                         "message": info.get("message", "")}
+    ordered = [(l, merged[l]) for l in _LABEL_ORDER if l in merged]
+    # 非标准标签（未来扩展）追加在后
+    for label, info in merged.items():
+        if label not in _LABEL_ORDER:
+            ordered.append((label, info))
+    return [{"label": l, **info} for l, info in ordered]
+
+
+def _account_ledger_runs(account_id: str, day: str) -> list:
+    data = _read_json(os.path.join(ACCOUNTS_DIR, account_id,
+                                   "ledger", f"{day}.json"))
+    return (data or {}).get("runs", []) if isinstance(data, dict) else []
+
+
+def _account_risk_events(account_id: str, day: str) -> list:
+    data = _read_json(os.path.join(ACCOUNTS_DIR, account_id,
+                                   "risk", f"{day}.json"))
+    return (data or {}).get("events", []) if isinstance(data, dict) else []
+
+
+def _account_reports_meta(account_id: str, day: str) -> list:
+    base = os.path.join(ACCOUNTS_DIR, account_id, "reports", day)
+    records = []
+    if not os.path.isdir(base):
+        return records
+    for rtype in sorted(os.listdir(base)):
+        rdir = os.path.join(base, rtype)
+        if not os.path.isdir(rdir):
+            continue
+        for name in sorted(os.listdir(rdir)):
+            if name.endswith(".json"):
+                payload = _read_json(os.path.join(rdir, name))
+                if isinstance(payload, dict):
+                    records.append(payload)
+    return records
+
+
+def _overall_of_run(run: dict) -> str:
+    return normalize_overall(run.get("status", ""))
+
+
+def normalize_overall(status: str) -> str:
+    s = str(status or "").lower()
+    if s in ("success",):
+        return "success"
+    if s in ("failed", "fail"):
+        return "failed"
+    if s in ("skipped", "skip"):
+        return "skipped"
+    if s in ("unknown",):
+        return "unknown"
+    return s or "-"
+
+
+def build_accounts_overview() -> dict:
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    accounts_out = []
+    counts = {"total": 0, "enabled": 0, "success": 0, "failed": 0,
+              "unknown": 0, "skipped": 0}
+    last_run_time = None
+    for acc in _registry_accounts():
+        counts["total"] += 1
+        enabled = bool(acc.get("enabled"))
+        if enabled:
+            counts["enabled"] += 1
+        aid = acc.get("account_id", "")
+        state_payload = _read_json(os.path.join(
+            ACCOUNTS_DIR, aid, "state", f"{today}_{aid}.json"))
+        runs = _account_ledger_runs(aid, today)
+        last_run = runs[-1] if runs else None
+        if last_run:
+            overall = normalize_overall(last_run.get("status", ""))
+            counts[overall] = counts.get(overall, 0) + 1
+            started = last_run.get("started_at", "")
+            if started and (last_run_time is None or started > last_run_time):
+                last_run_time = started
+        accounts_out.append({
+            "account_id": aid,
+            "display_name": acc.get("display_name", aid),
+            "enabled": enabled,
+            "tasks": _canonical_tasks(state_payload),
+            "last_run": ({
+                "run_id": last_run.get("run_id", ""),
+                "started_at": last_run.get("started_at", ""),
+                "duration_sec": last_run.get("duration_sec"),
+                "status": normalize_overall(last_run.get("status", "")),
+            } if last_run else None),
+        })
+    return {
+        "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": today,
+        "counts": counts,
+        "last_run_time": last_run_time,
+        "accounts": accounts_out,
+    }
+
+
+def build_account_detail(account_id: str):
+    if not _account_base(account_id):
+        return None
+    acc = next((a for a in _registry_accounts()
+                if a.get("account_id") == account_id), None)
+    if acc is None:
+        return None
+
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    days = [(now - timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(7)]
+
+    state_payload = _read_json(os.path.join(
+        ACCOUNTS_DIR, account_id, "state", f"{today}_{account_id}.json"))
+
+    daily_series = []
+    recent_errors = []
+    risk_events = []
+    reports = []
+    for day in days:
+        runs = _account_ledger_runs(account_id, day)
+        by_status = {"success": 0, "failed": 0, "unknown": 0, "skipped": 0}
+        for run in runs:
+            by_status[normalize_overall(run.get("status", ""))] = \
+                by_status.get(normalize_overall(run.get("status", "")), 0) + 1
+            for task in run.get("tasks", []):
+                if str(task.get("status", "")).lower() in ("fail", "failed"):
+                    recent_errors.append({
+                        "date": day, "run_id": run.get("run_id", ""),
+                        "task_type": task.get("task_type", ""),
+                        "message": task.get("message", ""),
+                    })
+        daily_series.append({"date": day, "runs": len(runs), **by_status})
+        for ev in _account_risk_events(account_id, day):
+            ev["_date"] = day
+            risk_events.append(ev)
+        reports.extend(_account_reports_meta(account_id, day))
+
+    return {
+        "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "profile": {
+            "account_id": account_id,
+            "display_name": acc.get("display_name", account_id),
+            "enabled": bool(acc.get("enabled")),
+            "config_file": acc.get("config_file", ""),
+            "task_policy": acc.get("task_policy"),
+            "schedule_profile": acc.get("schedule_profile"),
+        },
+        "today": {
+            "date": today,
+            "tasks": _canonical_tasks(state_payload),
+            "ledger_runs": [
+                {"run_id": r.get("run_id", ""),
+                 "started_at": r.get("started_at", ""),
+                 "duration_sec": r.get("duration_sec"),
+                 "status": normalize_overall(r.get("status", "")),
+                 "tasks": [
+                     {"task_type": t.get("task_type", ""),
+                      "status": t.get("status", ""),
+                      "message": t.get("message", ""),
+                      "verification": t.get("verification")}
+                     for t in r.get("tasks", [])
+                 ]}
+                for r in _account_ledger_runs(account_id, today)
+            ],
+        },
+        "daily_series": daily_series,
+        "recent_errors": recent_errors[-10:],
+        "risk_events": risk_events[-30:],
+        "reports": reports[-20:],
+    }
+
+
 # ---------- HTTP 服务 ----------
 
 class Handler(BaseHTTPRequestHandler):
@@ -227,7 +438,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(302, b"", "text/plain", {"Location": "/login"})
             return
 
-        if path == "/" or path == "/index.html":
+        if path == "/" or path == "/index.html" or path.startswith("/account/"):
+            # /account/{id} 也走同一单页，前端按 pathname 切换视图
             try:
                 with open(os.path.join(STATIC_DIR, "index.html"),
                           "rb") as f:
@@ -238,6 +450,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/overview":
             self._json(build_overview())
+            return
+
+        if path == "/api/accounts":
+            self._json(build_accounts_overview())
+            return
+
+        m = re.match(r"^/api/accounts/(acct_[A-Za-z0-9]{6,16})$", path)
+        if m:
+            detail = build_account_detail(m.group(1))
+            if detail is None:
+                self._json({"error": "account not found"}, 404)
+            else:
+                self._json(detail)
             return
 
         if path == "/api/history":
