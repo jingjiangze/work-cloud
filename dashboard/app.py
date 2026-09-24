@@ -371,12 +371,13 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
                     rs = cfg.setdefault("reportSettings", {})
                     rs.setdefault(allowed_flags[k], {})["enabled"] = enabled
                     changed["report"] = True
-            # 预检口径同步：开启了 weekly/monthly 就必须有 apikey
-            for rep in ("weekly", "monthly"):
+            # 预检口径提醒（不阻断保存）：开启了 weekly/monthly 但无 apikey
+            warn = None
+            for rep, label in (("weekly", "周报"), ("monthly", "月报")):
                 if (cfg.get("reportSettings", {}).get(rep, {})
                         .get("enabled")) and not (cfg.get("ai", {})
                                                   .get("apikey")):
-                    return {"error": f"开启{rep}需要先填写 AI apikey"}, 400
+                    warn = f"{label}已开启但 API Key 未配置，执行时预检会跳过该任务"
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
     except (OSError, json.JSONDecodeError) as exc:
@@ -384,8 +385,10 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
 
     _append_audit("update_account_config", account_id, {
         "fields": keys, **masked})
-    return {"ok": True, "account_id": account_id,
-            "message": "配置已保存，下轮执行生效"}, 200
+    msg = "配置已保存，下轮执行生效"
+    if warn:
+        msg += f"（注意：{warn}）"
+    return {"ok": True, "account_id": account_id, "message": msg}, 200
 
 
 def perform_list_models(account_id: str, payload: dict) -> tuple:

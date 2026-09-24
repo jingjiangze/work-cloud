@@ -199,8 +199,10 @@
       <label class="lbl" style="display:block;margin:8px 0 4px">接口地址 <span class="meta" id="ai-url-state"></span></label>
       <input id="ai-url" type="text" placeholder="https://api.example.com/v1" style="width:100%;max-width:560px;box-sizing:border-box;padding:8px;font-family:monospace">
       <label class="lbl" style="display:block;margin:8px 0 4px">模型 <span class="meta" id="ai-model-state"></span></label>
-      <input id="ai-model" list="ai-model-list" type="text" placeholder="例如 gpt-4o-mini / Qwen/Qwen2.5-7B-Instruct" style="width:100%;max-width:560px;box-sizing:border-box;padding:8px;font-family:monospace">
-      <datalist id="ai-model-list"></datalist>
+      <input id="ai-model" type="text" placeholder="例如 gpt-4o-mini / Qwen/Qwen2.5-7B-Instruct" style="width:100%;max-width:560px;box-sizing:border-box;padding:8px;font-family:monospace">
+      <div id="ai-model-pick-wrap" style="display:none;margin-top:6px">
+        <select id="ai-model-pick" onchange="pickModel(this.value)" style="width:100%;max-width:560px;box-sizing:border-box;padding:8px"></select>
+      </div>
       <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <button class="btn" onclick="loadModels()">加载可用模型</button>
         <span id="ai-models-msg" class="meta"></span>
@@ -336,12 +338,18 @@ const AI_PROVIDERS = {
 };
 function onProviderChange(){
   const v = document.getElementById("ai-provider").value;
-  const p = AI_PROVIDERS[v];
-  if (!p) return;  // 保持当前配置 / 自定义：不覆盖已填内容
-  document.getElementById("ai-url").value = p.url;
-  document.getElementById("ai-model").value = p.model;
-  document.getElementById("ai-model-list").innerHTML = "";
+  const urlEl = document.getElementById("ai-url");
+  const modelEl = document.getElementById("ai-model");
+  document.getElementById("ai-model-pick-wrap").style.display = "none";
   document.getElementById("ai-models-msg").textContent = "";
+  if (v === "custom") { urlEl.value = ""; modelEl.value = ""; urlEl.focus(); return; }
+  const p = AI_PROVIDERS[v];
+  if (!p) return;  // 保持当前配置：不覆盖
+  urlEl.value = p.url;
+  modelEl.value = p.model;
+}
+function pickModel(mid){
+  if (mid) document.getElementById("ai-model").value = mid;
 }
 
 async function loadModels(){
@@ -349,7 +357,8 @@ async function loadModels(){
   const api_url = document.getElementById("ai-url").value.trim();
   const api_key = document.getElementById("ai-key").value.trim();
   const msg = document.getElementById("ai-models-msg");
-  if (!api_url) { msg.textContent = "请先填接口地址"; msg.style.color = "var(--red)"; return; }
+  const wrap = document.getElementById("ai-model-pick-wrap");
+  if (!/^https?:\/\//.test(api_url)) { msg.textContent = "请先填接口地址（http(s):// 开头）"; msg.style.color = "var(--red)"; return; }
   if (!api_key) { msg.textContent = "加载模型列表需要先填 API Key"; msg.style.color = "var(--red)"; return; }
   if (!CSRF) await initCsrf();
   msg.textContent = "加载中…"; msg.style.color = "var(--orange)";
@@ -362,9 +371,12 @@ async function loadModels(){
     const body = await r.json();
     if (r.status === 401) { location.href = "/login"; return; }
     if (!r.ok) { msg.textContent = body.error || ("失败 " + r.status); msg.style.color = "var(--red)"; return; }
-    const dl = document.getElementById("ai-model-list");
-    dl.innerHTML = (body.models || []).map(m => `<option value="${esc(m)}">`).join("");
-    msg.textContent = `已加载 ${body.models.length} 个可用模型（输入框可下拉选择）`;
+    const models = body.models || [];
+    const sel = document.getElementById("ai-model-pick");
+    sel.innerHTML = `<option value="">— 从 ${models.length} 个模型中选择（覆盖手填）—</option>`
+      + models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+    wrap.style.display = "";
+    msg.textContent = `已加载 ${models.length} 个可用模型，在下拉框中选取`;
     msg.style.color = "var(--green)";
   } catch (e) {
     msg.textContent = "请求失败: " + e.message; msg.style.color = "var(--red)";
@@ -378,10 +390,8 @@ async function saveTasksAi(){
   const weekly = document.getElementById("rep-weekly").checked;
   const monthly = document.getElementById("rep-monthly").checked;
   const apikey = document.getElementById("ai-key").value.trim();
-  if ((weekly || monthly) && !apikey &&
-      !document.getElementById("ai-key-state").textContent.includes("已配置")) {
-    actMsg("开启周报/月报需要先填写 API Key（上方智能接口）", false); return;
-  }
+  const keyReady = apikey ||
+    document.getElementById("ai-key-state").textContent.includes("已配置");
   actMsg("保存中…", true);
   // 1) 任务开关 → registry task_policy（最高优先级）
   const p1 = await apiPost(id, {action: "set_task_policy", task_policy: {
@@ -411,8 +421,11 @@ async function saveTasksAi(){
   const ok = p1.ok && (!p2 || p2.code === 200);
   const msgs = [p1.message || p1.error, p2 ? (p2.message || p2.error) : null]
     .filter(Boolean).join("；");
-  actMsg(msgs || (ok ? "✓ 已保存，下轮执行生效" : "保存失败"), ok);
-  if (ok) setTimeout(() => showAccountDetail(id), 1400);
+  let warn = "";
+  if (ok && (weekly || monthly) && !keyReady)
+    warn = "（注意：周报/月报已开启但 API Key 未配置，执行时预检会跳过这两项——填好 Key 并再保存即可）";
+  actMsg((msgs || (ok ? "✓ 已保存，下轮执行生效" : "保存失败")) + warn, ok && !warn);
+  if (ok) setTimeout(() => showAccountDetail(id), 2200);
 }
 
 function badge(state){
