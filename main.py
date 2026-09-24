@@ -53,6 +53,9 @@ from services.verification_service import (
 from models.task_policy import resolve_decisions, TASK_LABELS
 from models import account_registry
 from models import execution_ledger
+from models.report_period import ReportPeriodResolver
+from models import report_record
+from util.report_validator import text_hash
 
 # 日志上下文支持
 _log_ctx = threading.local()
@@ -157,6 +160,11 @@ def _report_exists_on_server(api_client: ApiClient, report_type: str,
         except ValueError:
             return False
     if report_type == "week":
+        # Stage 10: createTime 落在当前周期区间即认定已存在
+        #（摆脱 flag+1 周次串匹配；weeks 匹配保留为兜底）
+        if ReportPeriodResolver.server_report_in_period(
+                last, ReportPeriodResolver.resolve("week", current_time)):
+            return True
         return last.get("weeks") == f"第{count}周"
     if report_type == "month":
         return last.get("yearmonth") == current_time.strftime("%Y-%m")
@@ -348,6 +356,7 @@ def _submit_report_common(
     form_type: int,
     state_store: Optional[TaskStateStore] = None,
     user_key: str = "unknown",
+    context=None,
 ) -> Dict[str, Any]:
     """通用日报/周报/月报提交逻辑"""
 
@@ -423,10 +432,16 @@ def _submit_report_common(
                 # 周报 title 类似 "第X周周报"，或者 weeks 字段 "第X周"
                 # API 返回的 weeks 字段比较可靠
                 current_week_info = api_client.get_weeks_date()[0]
-                current_week_str = f"第{count}周"  # 注意这里 count 是基于 flag+1，可能不准确如果重复提交
-                # 更稳健的方式：检查 last_report 的 createTime 是否在当前周范围内
-                # 但原代码是用 weeks 字符串匹配
-                if last_report.get("weeks") == current_week_str:
+                # Stage 10: 周期判断摆脱 flag+1——服务端报告 createTime
+                # 落在当前周期区间（真实日期，优先服务端 weeks_date）即
+                # 视为已提交；weeks 字符串匹配保留为兜底（标题序号仍按
+                # 服务端口径生成）
+                if ReportPeriodResolver.server_report_in_period(
+                        last_report,
+                        ReportPeriodResolver.resolve(
+                            "week", current_time, current_week_info)):
+                    should_skip = True
+                elif last_report.get("weeks") == f"第{count}周":
                     should_skip = True
             elif report_type == "month":
                 current_yearmonth = current_time.strftime("%Y-%m")
@@ -522,6 +537,20 @@ def _submit_report_common(
             if state_store:
                 state_store.mark(user_key, state_task, success_state_for(state_task), submit_message)
             record_report(user_key, state_task, content)
+            # Stage 10: 报告元数据记录（不含正文，仅指纹/周期/状态）
+            try:
+                _period = ReportPeriodResolver.resolve(
+                    report_type, current_time)
+                report_record.save_report_record(
+                    context, report_type, _period.to_dict(),
+                    content_hash=text_hash(content),
+                    preview=content,
+                    submit_status="success",
+                    verify_status=True,
+                    user_key=user_key,
+                    content_len=len(content or ""))
+            except Exception as rep_meta_err:
+                logger.warning(f"报告元数据记录失败（忽略）: {rep_meta_err}")
             return {
                 "status": "success",
                 "message": f"{title}已提交",
@@ -584,6 +613,7 @@ def submit_daily_report(
     config: ConfigManager,
     state_store: Optional[TaskStateStore] = None,
     user_key: str = "unknown",
+    context=None,
 ) -> Dict[str, Any]:
     """提交日报"""
     return _submit_report_common(
@@ -591,6 +621,7 @@ def submit_daily_report(
         config=config,
         state_store=state_store,
         user_key=user_key,
+        context=context,
         report_type="day",
         title_func=lambda c: f"第{c}天日报",
         check_time_func=lambda t: t.hour >= 12,
@@ -607,6 +638,7 @@ def submit_weekly_report(
     api_client: ApiClient,
     state_store: Optional[TaskStateStore] = None,
     user_key: str = "unknown",
+    context=None,
 ) -> Dict[str, Any]:
     """提交周报"""
     submit_day = config.get_value("config.reportSettings.weekly.submitTime")
@@ -620,6 +652,7 @@ def submit_weekly_report(
         config=config,
         state_store=state_store,
         user_key=user_key,
+        context=context,
         report_type="week",
         title_func=lambda c: f"第{c}周周报",
         check_time_func=check_time,
@@ -636,6 +669,7 @@ def submit_monthly_report(
     api_client: ApiClient,
     state_store: Optional[TaskStateStore] = None,
     user_key: str = "unknown",
+    context=None,
 ) -> Dict[str, Any]:
     """提交月报"""
     submit_day = config.get_value("config.reportSettings.monthly.submitTime")
@@ -652,6 +686,7 @@ def submit_monthly_report(
         config=config,
         state_store=state_store,
         user_key=user_key,
+        context=context,
         report_type="month",
         title_func=lambda c: f"第{c}月月报",
         check_time_func=check_time,
@@ -860,11 +895,11 @@ def run(config: ConfigManager,
                 ("checkin", lambda: perform_clock_in(
                     api_client, config, state_store, user_key)),
                 ("daily_report", lambda: submit_daily_report(
-                    api_client, config, state_store, user_key)),
+                    api_client, config, state_store, user_key, context)),
                 ("weekly_report", lambda: submit_weekly_report(
-                    config, api_client, state_store, user_key)),
+                    config, api_client, state_store, user_key, context)),
                 ("monthly_report", lambda: submit_monthly_report(
-                    config, api_client, state_store, user_key)),
+                    config, api_client, state_store, user_key, context)),
             ]
             task_funcs = [(TASK_LABELS[k], fn) for k, fn in _candidate_funcs
                           if task_decisions[k][0]]

@@ -51,7 +51,8 @@ class TestLedgerStore(unittest.TestCase):
             "user": "acct_bbb22222", "status": "failed",
             "tasks": [{"task_type": "打卡", "status": "fail",
                        "message": "boom"}]})
-        today = "2026-09-23"
+        import datetime as _dt
+        today = _dt.datetime.now().strftime("%Y-%m-%d")
         a = execution_ledger.load_day(dir_a, today)["runs"]
         b = execution_ledger.load_day(dir_b, today)["runs"]
         self.assertEqual([r["run_id"] for r in a], ["run_1"])
@@ -61,11 +62,13 @@ class TestLedgerStore(unittest.TestCase):
 
     def test_corruption_rebuild(self):
         tmp = tempfile.mkdtemp(prefix="ledger_bad_")
-        path = os.path.join(tmp, "2026-09-23.json")
+        import datetime as _dt
+        today = _dt.datetime.now().strftime("%Y-%m-%d")
+        path = os.path.join(tmp, f"{today}.json")
         with open(path, "w") as f:
             f.write("{broken json")
         execution_ledger.append_run(tmp, {"run_id": "run_x", "status": "skipped"})
-        runs = execution_ledger.load_day(tmp, "2026-09-23")["runs"]
+        runs = execution_ledger.load_day(tmp, today)["runs"]
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["run_id"], "run_x")
 
