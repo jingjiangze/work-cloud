@@ -388,6 +388,48 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
             "message": "配置已保存，下轮执行生效"}, 200
 
 
+def perform_list_models(account_id: str, payload: dict) -> tuple:
+    """代理拉取 OpenAI 兼容接口的可用模型列表（GET {api_url}/models）。
+
+    api_url 来自页面（用户自己的接口），做协议白名单校验；api_key 仅
+    用于本次请求，不落盘不打日志。只取 model id 列表返回（截断 200）。
+    """
+    import urllib.request
+    import urllib.error
+    if not _ACCOUNT_ID_RE.match(str(account_id or "")):
+        return {"error": "invalid account id"}, 400
+    api_url = str(payload.get("api_url") or "").strip().rstrip("/")
+    api_key = str(payload.get("api_key") or "").strip()
+    if not re.match(r"^https?://", api_url):
+        return {"error": "接口地址必须以 http(s):// 开头"}, 400
+    if not api_key:
+        return {"error": "缺少 API Key"}, 400
+    req = urllib.request.Request(
+        api_url + "/models",
+        headers={"Authorization": "Bearer " + api_key,
+                 "User-Agent": "work-cloud-dashboard/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            body = json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:160]
+        except Exception:
+            pass
+        return {"error": f"接口返回 {exc.code}: {detail or exc.reason}"}, 502
+    except Exception as exc:
+        return {"error": f"请求失败: {str(exc)[:160]}"}, 502
+    models = []
+    for item in (body.get("data") if isinstance(body, dict) else None) or []:
+        mid = item.get("id") if isinstance(item, dict) else None
+        if mid:
+            models.append(str(mid))
+    models = sorted(set(models))[:200]
+    return {"ok": True, "models": models,
+            "message": f"共 {len(models)} 个模型"}, 200
+
+
 def _new_session() -> str:
     token = secrets.token_urlsafe(24)
     csrf = secrets.token_urlsafe(24)
@@ -893,6 +935,30 @@ class Handler(BaseHTTPRequestHandler):
                 return
             resp, code = perform_update_account_config(
                 m2.group(1), payload if isinstance(payload, dict) else {})
+            self._json(resp, code)
+            return
+
+        # Stage 17: 在线加载供应商可用模型列表（服务端代理，规避浏览器 CORS）
+        m3 = re.match(r"^/api/accounts/(acct_[A-Za-z0-9]{6,16})/models$",
+                      parsed.path)
+        if m3:
+            cookie_token = _parse_cookie(self.headers.get("Cookie", ""))
+            if not _valid_session(cookie_token):
+                self._json({"error": "not authenticated"}, 401)
+                return
+            if not _csrf_valid(cookie_token,
+                               self.headers.get("X-CSRF-Token", "")):
+                self._json({"error": "csrf token missing or invalid"}, 403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                body = self.rfile.read(min(length, 65536)).decode("utf-8")
+                payload = json.loads(body) if body.strip() else {}
+            except (ValueError, OSError):
+                self._json({"error": "invalid json body"}, 400)
+                return
+            resp, code = perform_list_models(
+                m3.group(1), payload if isinstance(payload, dict) else {})
             self._json(resp, code)
             return
 

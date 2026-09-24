@@ -170,29 +170,44 @@
     <div class="card" id="detail-profile"></div>
     <div class="card"><h2>账户操作</h2>
       <div id="detail-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"></div>
-      <div style="margin-top:10px">
-        <label class="lbl" style="display:block;margin-bottom:4px">任务开关（JSON，留空表示跟随原配置旗标）</label>
-        <textarea id="policy-input" rows="3" style="width:100%;max-width:560px;font-family:monospace"
-          placeholder='{"checkin": true, "daily_report": false}'></textarea>
-        <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
-          <button class="btn" onclick="savePolicy()">保存任务开关</button>
-          <span id="action-msg" class="meta"></span>
-        </div>
-      </div>
+      <div id="action-msg" class="meta" style="margin-top:6px"></div>
+      <span class="meta">所有操作经 CSRF 校验并记入审计台账</span>
     </div>
-    <div class="card"><h2>任务开关与 AI 设置</h2>
-      <div class="meta" style="margin-bottom:8px">四个开关为本账号最高优先级开关（保存后立即生效）；周报/月报由 AI 生成，开启前必须填写 apikey</div>
-      <div style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px">
+    <div class="card"><h2>任务开关</h2>
+      <div class="meta" style="margin-bottom:8px">本账号最高优先级开关（保存后立即生效）；周报/月报由 AI 生成，开启前必须配置好智能接口</div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap">
         <label><input type="checkbox" id="task-checkin"> 打卡签到</label>
         <label><input type="checkbox" id="rep-daily"> 日报提交</label>
         <label><input type="checkbox" id="rep-weekly"> 周报提交</label>
         <label><input type="checkbox" id="rep-monthly"> 月报提交</label>
       </div>
-      <label class="lbl" style="display:block;margin:6px 0 4px">AI apikey（仅周报/月报需要） <span class="meta" id="ai-key-state"></span></label>
+    </div>
+    <div class="card"><h2>智能接口（AI）</h2>
+      <div class="meta" style="margin-bottom:8px">兼容 OpenAI 接口格式的大模型服务；日报提交不需要 AI</div>
+      <label class="lbl" style="display:block;margin:6px 0 4px">供应商预设 <span class="meta">（选中后自动填接口地址与模型）</span></label>
+      <select id="ai-provider" onchange="onProviderChange()" style="width:100%;max-width:560px;box-sizing:border-box;padding:8px">
+        <option value="">— 保持当前配置 —</option>
+        <option value="openai">OpenAI 官方</option>
+        <option value="siliconflow">硅基流动（有免费模型）</option>
+        <option value="deepseek">DeepSeek 深度求索</option>
+        <option value="moonshot">月之暗面 Kimi</option>
+        <option value="dashscope">阿里云百炼（通义）</option>
+        <option value="custom">自定义接口</option>
+      </select>
+      <label class="lbl" style="display:block;margin:8px 0 4px">API Key <span class="meta" id="ai-key-state"></span></label>
       <input id="ai-key" type="password" placeholder="sk-...（留空表示不修改）" style="width:100%;max-width:560px;box-sizing:border-box;padding:8px;font-family:monospace">
-      <div style="margin-top:10px">
-        <button class="btn" onclick="saveTasksAi()">保存任务开关与 AI 设置</button>
-        <span class="meta" style="margin-left:8px">下轮执行生效；可点上方「立即运行」立刻验证</span>
+      <label class="lbl" style="display:block;margin:8px 0 4px">接口地址 <span class="meta" id="ai-url-state"></span></label>
+      <input id="ai-url" type="text" placeholder="https://api.example.com/v1" style="width:100%;max-width:560px;box-sizing:border-box;padding:8px;font-family:monospace">
+      <label class="lbl" style="display:block;margin:8px 0 4px">模型 <span class="meta" id="ai-model-state"></span></label>
+      <input id="ai-model" list="ai-model-list" type="text" placeholder="例如 gpt-4o-mini / Qwen/Qwen2.5-7B-Instruct" style="width:100%;max-width:560px;box-sizing:border-box;padding:8px;font-family:monospace">
+      <datalist id="ai-model-list"></datalist>
+      <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn" onclick="loadModels()">加载可用模型</button>
+        <span id="ai-models-msg" class="meta"></span>
+      </div>
+      <div style="margin-top:12px">
+        <button class="btn" onclick="saveTasksAi()">保存全部设置</button>
+        <span class="meta" style="margin-left:8px">任务开关保存后立即生效；下轮执行可用「立即运行」验证</span>
       </div>
     </div>
     <div class="card"><h2>今日任务</h2><div id="detail-today"></div></div>
@@ -304,29 +319,60 @@ function renderActions(p){
   const bar = document.getElementById("detail-actions");
   if (!bar) return;
   bar.innerHTML = `
-    <button class="btn" onclick="accountAction('${esc(p.account_id)}','run')">▶ 立即运行</button>
+    <button class="btn" onclick="accountAction(curAcctId,'run')">▶ 立即运行</button>
     ${p.enabled
-      ? `<button class="btn" onclick="accountAction('${esc(p.account_id)}','disable')">⏸ 停用</button>`
-      : `<button class="btn" onclick="accountAction('${esc(p.account_id)}','enable')">✓ 启用</button>`}
-    <span class="meta">所有操作经 CSRF 校验并记入审计台账</span>`;
-  document.getElementById("policy-input").value =
-    p.task_policy ? JSON.stringify(p.task_policy, null, 1) : "";
+      ? `<button class="btn" onclick="accountAction(curAcctId,'disable')">⏸ 停用</button>`
+      : `<button class="btn" onclick="accountAction(curAcctId,'enable')">✓ 启用</button>`}`;
 }
 
-async function savePolicy(){
-  const id = decodeURIComponent(location.pathname.split("/").pop() || "");
-  if (!id.startsWith("acct_")) return;
-  let policy = null;
-  const raw = document.getElementById("policy-input").value.trim();
-  if (raw) {
-    try { policy = JSON.parse(raw); }
-    catch (e) { actMsg("任务开关不是合法 JSON: " + e.message, false); return; }
+/* ============ Stage 17: 供应商预设与在线模型列表 ============ */
+let curAcctId = "";
+const AI_PROVIDERS = {
+  openai:      {url: "https://api.openai.com/v1", model: "gpt-4o-mini"},
+  siliconflow: {url: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen2.5-7B-Instruct"},
+  deepseek:    {url: "https://api.deepseek.com/v1", model: "deepseek-chat"},
+  moonshot:    {url: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k"},
+  dashscope:   {url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus"},
+};
+function onProviderChange(){
+  const v = document.getElementById("ai-provider").value;
+  const p = AI_PROVIDERS[v];
+  if (!p) return;  // 保持当前配置 / 自定义：不覆盖已填内容
+  document.getElementById("ai-url").value = p.url;
+  document.getElementById("ai-model").value = p.model;
+  document.getElementById("ai-model-list").innerHTML = "";
+  document.getElementById("ai-models-msg").textContent = "";
+}
+
+async function loadModels(){
+  const id = curAcctId || (decodeURIComponent(location.pathname.split("/").pop() || ""));
+  const api_url = document.getElementById("ai-url").value.trim();
+  const api_key = document.getElementById("ai-key").value.trim();
+  const msg = document.getElementById("ai-models-msg");
+  if (!api_url) { msg.textContent = "请先填接口地址"; msg.style.color = "var(--red)"; return; }
+  if (!api_key) { msg.textContent = "加载模型列表需要先填 API Key"; msg.style.color = "var(--red)"; return; }
+  if (!CSRF) await initCsrf();
+  msg.textContent = "加载中…"; msg.style.color = "var(--orange)";
+  try {
+    const r = await fetch(`/api/accounts/${id}/models`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": CSRF},
+      body: JSON.stringify({api_url, api_key}),
+    });
+    const body = await r.json();
+    if (r.status === 401) { location.href = "/login"; return; }
+    if (!r.ok) { msg.textContent = body.error || ("失败 " + r.status); msg.style.color = "var(--red)"; return; }
+    const dl = document.getElementById("ai-model-list");
+    dl.innerHTML = (body.models || []).map(m => `<option value="${esc(m)}">`).join("");
+    msg.textContent = `已加载 ${body.models.length} 个可用模型（输入框可下拉选择）`;
+    msg.style.color = "var(--green)";
+  } catch (e) {
+    msg.textContent = "请求失败: " + e.message; msg.style.color = "var(--red)";
   }
-  await accountAction(id, "set_task_policy", {task_policy: policy});
 }
 
 async function saveTasksAi(){
-  const id = decodeURIComponent(location.pathname.split("/").pop() || "");
+  const id = curAcctId || (decodeURIComponent(location.pathname.split("/").pop() || ""));
   if (!id.startsWith("acct_")) return;
   if (!CSRF) await initCsrf();
   const weekly = document.getElementById("rep-weekly").checked;
@@ -334,7 +380,7 @@ async function saveTasksAi(){
   const apikey = document.getElementById("ai-key").value.trim();
   if ((weekly || monthly) && !apikey &&
       !document.getElementById("ai-key-state").textContent.includes("已配置")) {
-    actMsg("开启周报/月报需要先填写 AI apikey", false); return;
+    actMsg("开启周报/月报需要先填写 API Key（上方智能接口）", false); return;
   }
   actMsg("保存中…", true);
   // 1) 任务开关 → registry task_policy（最高优先级）
@@ -346,13 +392,19 @@ async function saveTasksAi(){
   }});
   if (p1.code === 401) { location.href = "/login"; return; }
   if (p1.code === 403) { await initCsrf(); actMsg("CSRF 校验失败，已刷新令牌，请重试", false); return; }
-  // 2) apikey（填写了才提交）→ 配置文件
+  // 2) 智能接口（任一栏填写了才提交）→ 配置文件
+  const aiPayload = {};
+  if (apikey) aiPayload.ai_apikey = apikey;
+  const aiUrl = document.getElementById("ai-url").value.trim();
+  const aiModel = document.getElementById("ai-model").value.trim();
+  if (aiUrl) aiPayload.ai_apiurl = aiUrl;
+  if (aiModel) aiPayload.ai_model = aiModel;
   let p2 = null;
-  if (apikey) {
+  if (Object.keys(aiPayload).length) {
     const resp = await fetch(`/api/accounts/${id}/config`, {
       method: "POST",
       headers: {"Content-Type": "application/json", "X-CSRF-Token": CSRF},
-      body: JSON.stringify({ai_apikey: apikey}),
+      body: JSON.stringify(aiPayload),
     });
     try { p2 = {code: resp.status, ...(await resp.json())}; } catch { p2 = {code: resp.status}; }
   }
@@ -360,7 +412,7 @@ async function saveTasksAi(){
   const msgs = [p1.message || p1.error, p2 ? (p2.message || p2.error) : null]
     .filter(Boolean).join("；");
   actMsg(msgs || (ok ? "✓ 已保存，下轮执行生效" : "保存失败"), ok);
-  if (ok) setTimeout(() => showAccountDetail(id), 1400);  // 停留片刻让提示可见
+  if (ok) setTimeout(() => showAccountDetail(id), 1400);
 }
 
 function badge(state){
@@ -471,17 +523,25 @@ async function showAccountDetail(id){
     <div class="kv"><span class="k">调度窗口</span><span>${p.schedule_profile?esc(JSON.stringify(p.schedule_profile)):"未设置（使用全局窗口）"}</span></div>`;
   renderActions(p);
   actMsg("");
-  // Stage 15/16: 任务开关 + AI 设置面板回填
+  // Stage 15/16/17: 任务开关 + 智能接口面板回填
   // 优先级：registry task_policy 显式值 > 配置旗标（checkin 无旗标默认执行）
   const tp = p.task_policy || {};
+  curAcctId = p.account_id;
   const st = document.getElementById("ai-key-state");
-  if (st) st.textContent = p.ai_configured ? "（已配置）" : "（未配置——开启周报/月报前必须填写）";
+  if (st) st.textContent = p.ai_configured ? "（已配置）" : "（未配置——开启周报/月报前必须配置）";
+  const us = document.getElementById("ai-url-state");
+  if (us) us.textContent = p.ai_apiurl ? "" : "";
+  const ms = document.getElementById("ai-model-state");
+  if (ms) ms.textContent = p.ai_model ? `当前: ${p.ai_model}` : "";
   const setc = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
   setc("task-checkin", tp.checkin !== undefined ? tp.checkin : true);
   setc("rep-daily", tp.daily_report !== undefined ? tp.daily_report : p.daily_enabled);
   setc("rep-weekly", tp.weekly_report !== undefined ? tp.weekly_report : p.weekly_enabled);
   setc("rep-monthly", tp.monthly_report !== undefined ? tp.monthly_report : p.monthly_enabled);
   const ki = document.getElementById("ai-key"); if (ki) ki.value = "";
+  const ui = document.getElementById("ai-url"); if (ui) ui.value = p.ai_apiurl || "";
+  const mi = document.getElementById("ai-model"); if (mi) mi.value = p.ai_model || "";
+  document.getElementById("ai-provider").value = "";
 
   const today = d.today;
   document.getElementById("detail-today").innerHTML = (today.tasks.length || today.ledger_runs.length)
