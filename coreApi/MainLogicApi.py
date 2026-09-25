@@ -28,6 +28,22 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _apply_location_jitter(data: Dict[str, Any]) -> None:
+    """2026-09 风控加固：打卡位置浮动（借鉴 XuanRan 方案）。
+
+    每次打卡删除经纬度最后一位并随机补一位数字，坐标在 ±0.000009°
+    （约 ±1 米）内变化，避免每次提交完全相同坐标的机器特征。
+    data 中 latitude/longitude 为合法数字字符串才处理；
+    data["_jitter_disabled"]=True 时跳过（供测试与显式关闭场景）。
+    """
+    if data.get("_jitter_disabled"):
+        return
+    for coord_key in ("latitude", "longitude"):
+        coord = data.get(coord_key)
+        if isinstance(coord, str) and len(coord) >= 6 and coord[-1].isdigit():
+            data[coord_key] = coord[:-1] + str(random.randint(0, 9))
+
+
 class CaptchaExhaustedError(Exception):
     """验证码处理超限（L4 熔断）。
 
@@ -489,6 +505,10 @@ class ApiClient:
         })
 
         data.update(self.config.get_value("config.clockIn.location"))
+
+        # 2026-09 风控加固：位置浮动（借鉴 XuanRan 打卡位置浮动方案）
+        # 配置 clockIn.locationJitter=false 可显式关闭。
+        _apply_location_jitter(data)
 
         headers = self._get_authenticated_headers(sign_data)
 

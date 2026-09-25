@@ -205,15 +205,17 @@ def perform_account_action(account_id: str, action: str,
 def _default_account_config(phone: str, password: str) -> dict:
     """新账号默认配置（登录验证通过后落盘 user/{user_key}.json）。
 
-    打卡开启（位置信息待用户补填后才会真正打卡成功）；报告默认关闭
-    （AI apikey 未配置时预检会拦截整轮执行）。
+    2026-09-25 用户口径：所有账号关闭日报、周报/月报全开（apikey 由
+    用户后续在面板填入）；默认定位谷庄村（嘉祥县卧龙山街道，用户
+    当前实习地，坐标经腾讯地图/Bigemap/地名网三源交叉验证）。
     """
     return {"config": {
         "user": {"phone": phone, "password": password},
         "clockIn": {
             "enabled": True, "mode": "daily",
-            "location": {"address": "", "latitude": "", "longitude": "",
-                         "province": "", "city": "", "area": ""},
+            "location": {"address": "山东省 · 济宁市 · 嘉祥县 · 在卧龙山街道谷庄村附近",
+                         "latitude": "35.424247", "longitude": "116.283722",
+                         "province": "山东省", "city": "济宁市", "area": "嘉祥县"},
             "imageCount": 0,
             "description": ["今日实习工作正常开展", "按时到岗，完成日常工作",
                             "完成今日岗位任务", "按计划开展实习工作"],
@@ -221,8 +223,8 @@ def _default_account_config(phone: str, password: str) -> dict:
         },
         "reportSettings": {
             "daily": {"enabled": False, "imageCount": 0},
-            "weekly": {"enabled": False, "imageCount": 0, "submitTime": 5},
-            "monthly": {"enabled": False, "imageCount": 0, "submitTime": 28},
+            "weekly": {"enabled": True, "imageCount": 0, "submitTime": 5},
+            "monthly": {"enabled": True, "imageCount": 0, "submitTime": 28},
         },
         "ai": {"model": "gpt-4o-mini", "apikey": "",
                "apiUrl": "https://api.openai.com/"},
