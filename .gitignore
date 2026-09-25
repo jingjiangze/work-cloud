@@ -48,3 +48,6 @@ logs/
 reports/
 dashboard/secret_key.txt
 dashboard/password.txt
+
+# WorkBuddy session data (not project code)
+.workbuddy/
