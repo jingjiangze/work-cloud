@@ -462,11 +462,18 @@ class ApiClient:
         sign_data = None
         planId = self.config.get_value("planInfo.planId")
 
+        # device 可能因配置模板/手改成为 dict，签名与 payload 必须使用
+        # 同一字符串（服务端按收到的 device 字段重算签名，内容不透明）
+        device_info = self.config.get_value("config.device")
+        if device_info is not None and not isinstance(device_info, str):
+            device_info = json.dumps(device_info, ensure_ascii=False,
+                                     separators=(",", ":"))
+
         if self.config.get_value("userInfo.userType") != "teacher":
             # 2026-09: v5/save 已被服务端弃用（版本过低拦截），升级 v6
             url = "attendence/clock/v6/save"
             sign_data = [
-                self.config.get_value("config.device"),
+                device_info,
                 checkin_info.get("type"),
                 planId,
                 self.config.get_value("userInfo.userId"),
@@ -492,7 +499,7 @@ class ApiClient:
             "country": "中国",
             "createTime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "description": checkin_info.get("description", None),
-            "device": self.config.get_value("config.device"),
+            "device": device_info,
             "state": "NORMAL",
             "type": checkin_info.get("type"),
             "planId": planId,

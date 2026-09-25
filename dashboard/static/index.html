@@ -234,6 +234,20 @@
         <span id="loc-msg" class="meta" style="margin-left:8px"></span>
       </div>
     </div>
+    <div class="card"><h2>消息推送（微信）</h2>
+      <div class="meta" style="margin-bottom:8px">每个账号可绑定不同的微信：在微信内关注「pushplus 推送加」公众号并绑定后获取 token，填到对应账号即可。打卡/报告结果将推送到该微信</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin:6px 0">
+        <label><input type="checkbox" id="push-enabled"> 启用推送</label>
+        <span class="meta" id="push-state"></span>
+      </div>
+      <label class="lbl" style="display:block;margin:6px 0 4px">PushPlus token <span class="meta">（留空表示不修改）</span></label>
+      <input id="push-token" type="password" placeholder="在 pushplus.plus 微信公众号绑定后获取" style="width:100%;max-width:560px;box-sizing:border-box;padding:8px;font-family:monospace">
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn" onclick="savePush()">保存推送设置</button>
+        <button class="btn" onclick="testPush()">发送测试消息</button>
+        <span id="push-msg" class="meta"></span>
+      </div>
+    </div>
     <div class="card"><h2>今日任务</h2><div id="detail-today"></div></div>
     <div class="card"><h2>最近 7 天</h2><div class="daybar" id="detail-bars"></div>
       <div id="detail-series" style="margin-top:8px"></div></div>
@@ -494,6 +508,57 @@ async function saveLocation(){
   msg.style.color = resp.ok ? "var(--green)" : "var(--red)";
 }
 
+/* ============ Stage 20: 每账号独立微信推送（PushPlus） ============ */
+function _pushAcctId(){
+  return curAcctId || (decodeURIComponent(location.pathname.split("/").pop() || ""));
+}
+async function savePush(){
+  const id = _pushAcctId();
+  if (!id.startsWith("acct_")) return;
+  if (!CSRF) await initCsrf();
+  const token = document.getElementById("push-token").value.trim();
+  const enabled = document.getElementById("push-enabled").checked;
+  const msg = document.getElementById("push-msg");
+  if (enabled && !token &&
+      !document.getElementById("push-state").textContent.includes("已配置")) {
+    msg.textContent = "启用推送需要先填写 PushPlus token"; msg.style.color = "var(--red)";
+    return;
+  }
+  if (!token && !enabled &&
+      !document.getElementById("push-state").textContent.includes("已配置")) {
+    msg.textContent = "请先填写 token"; msg.style.color = "var(--red)"; return;
+  }
+  msg.textContent = "保存中…"; msg.style.color = "var(--orange)";
+  const payload = {push_enabled: enabled};
+  if (token) payload.push_token = token;
+  const resp = await fetch(`/api/accounts/${id}/config`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-CSRF-Token": CSRF},
+    body: JSON.stringify(payload),
+  });
+  let body = {};
+  try { body = await resp.json(); } catch {}
+  if (resp.status === 401) { location.href = "/login"; return; }
+  if (resp.status === 403) { await initCsrf(); msg.textContent = "CSRF 校验失败，请重试"; msg.style.color = "var(--red)"; return; }
+  msg.textContent = body.message || body.error || (resp.ok ? "已保存" : "保存失败");
+  msg.style.color = resp.ok ? "var(--green)" : "var(--red)";
+}
+async function testPush(){
+  const id = _pushAcctId();
+  if (!id.startsWith("acct_")) return;
+  if (!CSRF) await initCsrf();
+  const msg = document.getElementById("push-msg");
+  msg.textContent = "发送中…"; msg.style.color = "var(--orange)";
+  const resp = await fetch(`/api/accounts/${id}/push-test`, {
+    method: "POST", headers: {"X-CSRF-Token": CSRF},
+  });
+  let body = {};
+  try { body = await resp.json(); } catch {}
+  if (resp.status === 401) { location.href = "/login"; return; }
+  msg.textContent = body.message || body.error || (resp.ok ? "已发送" : "失败");
+  msg.style.color = resp.ok ? "var(--green)" : "var(--red)";
+}
+
 async function saveTasksAi(){
   const id = curAcctId || (decodeURIComponent(location.pathname.split("/").pop() || ""));
   if (!id.startsWith("acct_")) return;
@@ -669,6 +734,15 @@ async function showAccountDetail(id){
   // Stage 19: 模拟定位卡片回填 + 地图初始化
   initLocationMap(p.location || {});
   const lm = document.getElementById("loc-msg"); if (lm) { lm.textContent = ""; }
+  // Stage 20: 推送卡片回填（token 只回掩码）
+  const ps = document.getElementById("push-state");
+  if (ps) ps.textContent = p.push_configured
+      ? `（已配置 ${p.push_token_masked}${p.push_enabled ? "，已启用" : "，未启用"}）`
+      : "（未配置）";
+  const pe = document.getElementById("push-enabled");
+  if (pe) pe.checked = !!p.push_enabled;
+  const pt = document.getElementById("push-token");
+  if (pt) pt.value = "";
 
   const today = d.today;
   document.getElementById("detail-today").innerHTML = (today.tasks.length || today.ledger_runs.length)

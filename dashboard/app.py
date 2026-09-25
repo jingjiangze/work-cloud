@@ -249,8 +249,10 @@ def _default_account_config(phone: str, password: str) -> dict:
             "model": "gpt-4o-mini", "apikey": "",
             "apiUrl": "https://api.openai.com/"},
         "pushNotifications": [],
-        "device": {"brand": "TA J20", "systemVersion": "17",
-                   "Platform": "Android", "isPhysical": True},
+        # device 必须是字符串（参与打卡签名，dict 会导致 join 失败）；
+        # 格式与真实 App 一致
+        "device": "{brand: TA J20, systemVersion: 17, Platform: Android, "
+                  "isPhysicalDevice: true, incremental: K23V10A}",
     }}
 
 
@@ -341,6 +343,13 @@ def _account_ai_report_state(config_file: str) -> dict:
     for k in ("daily", "weekly", "monthly"):
         state[f"{k}_enabled"] = bool((rs.get(k) or {}).get("enabled"))
     state["location"] = dict((cfg.get("clockIn") or {}).get("location") or {})
+    # PushPlus 状态（token 只回掩码）
+    pp = next((e for e in (cfg.get("pushNotifications") or [])
+               if isinstance(e, dict) and e.get("type") == "PushPlus"), None)
+    state["push_enabled"] = bool(pp and pp.get("enabled"))
+    state["push_configured"] = bool(pp and pp.get("token"))
+    state["push_token_masked"] = _mask_key(pp["token"]) if (
+        pp and pp.get("token")) else ""
     return state
 
 
@@ -354,8 +363,10 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
     payload 可选键：ai_apikey / ai_model / ai_apiurl /
     daily_enabled / weekly_enabled / monthly_enabled /
     loc_address / loc_latitude / loc_longitude / loc_province /
-    loc_city / loc_area（模拟定位，写 config.clockIn.location）。
-    至少提供一个键，否则 400。审计不记录 apikey 明文。
+    loc_city / loc_area（模拟定位，写 config.clockIn.location）/
+    push_enabled / push_token（PushPlus 微信推送，写
+    config.pushNotifications，每账号独立接入各自的微信）。
+    至少提供一个键，否则 400。审计不记录 apikey/token 明文。
     """
     if not _ACCOUNT_ID_RE.match(str(account_id or "")):
         return {"error": "invalid account id"}, 400
@@ -370,8 +381,9 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
     allowed_loc = {"loc_address": "address", "loc_latitude": "latitude",
                    "loc_longitude": "longitude", "loc_province": "province",
                    "loc_city": "city", "loc_area": "area"}
+    push_keys = ("push_enabled", "push_token")
     keys = [k for k in list(allowed_ai) + list(allowed_flags)
-            + list(allowed_loc) if k in payload]
+            + list(allowed_loc) + list(push_keys) if k in payload]
     if not keys:
         return {"error": "没有需要更新的字段"}, 400
 
@@ -383,7 +395,8 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             cfg = data.get("config") or {}
-            changed = {"ai": False, "report": False, "loc": False}
+            changed = {"ai": False, "report": False, "loc": False,
+                       "push": False}
             masked = {}
             for k in keys:
                 if k in allowed_ai:
@@ -395,6 +408,32 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
                     if k == "ai_apikey":
                         masked["apikey"] = _mask_key(value)
                     changed["ai"] = True
+                elif k in push_keys:
+                    # PushPlus 条目 upsert；保留其他渠道条目不动
+                    plist = cfg.setdefault("pushNotifications", [])
+                    entry = next((e for e in plist if isinstance(e, dict)
+                                  and e.get("type") == "PushPlus"), None)
+                    if k == "push_token":
+                        value = str(payload.get(k) or "").strip()
+                        if not value:
+                            return {"error": "PushPlus token 不能为空"}, 400
+                        if entry is None:
+                            entry = {"type": "PushPlus", "enabled": False}
+                            plist.append(entry)
+                        entry["token"] = value
+                        masked["push_token"] = _mask_key(value)
+                    else:
+                        enabled = bool(payload.get(k))
+                        if enabled and (entry is None
+                                        or not entry.get("token")):
+                            return {"error": "启用推送需要先填写 "
+                                             "PushPlus token"}, 400
+                        if entry is None:
+                            entry = {"type": "PushPlus",
+                                     "enabled": enabled}
+                            plist.append(entry)
+                        entry["enabled"] = enabled
+                    changed["push"] = True
                 elif k in allowed_loc:
                     value = str(payload.get(k) or "").strip()
                     if k in ("loc_latitude", "loc_longitude"):
@@ -475,6 +514,63 @@ def perform_list_models(account_id: str, payload: dict) -> tuple:
     models = sorted(set(models))[:200]
     return {"ok": True, "models": models,
             "message": f"共 {len(models)} 个模型"}, 200
+
+
+def perform_push_test(account_id: str) -> tuple:
+    """向本账号已启用的推送渠道各发一条测试消息（验证链路连通）。
+
+    渠道凭据从该账号自身配置读取——测试的就是"这个账号接的这个微信"。
+    """
+    if not _ACCOUNT_ID_RE.match(str(account_id or "")):
+        return {"error": "invalid account id"}, 400
+    account = account_registry.get_account(account_id)
+    if account is None:
+        return {"error": "account not found"}, 404
+    path = os.path.join(PROJECT, "user", account.config_file)
+    if not os.path.isfile(path):
+        return {"error": "配置文件不存在: " + account.config_file}, 404
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = (json.load(f) or {}).get("config") or {}
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"error": f"配置文件读取失败: {exc}"}, 500
+
+    channels = [c for c in (cfg.get("pushNotifications") or [])
+                if isinstance(c, dict) and c.get("enabled")]
+    if not channels:
+        return {"error": "没有已启用的推送渠道"}, 400
+
+    from util.MessagePush import MessagePusher
+    pusher = MessagePusher(channels)
+    html = ("<p>✅ 推送链路测试成功</p><p>账号："
+            f"<b>{account.display_name}</b></p>"
+            "<p>收到本条消息即表示打卡结果会推送到这个微信。</p>")
+    ok_channels, errors = [], []
+    for ch in channels:
+        t = ch.get("type")
+        try:
+            if t == "PushPlus":
+                pusher._pushplus_push(ch, "work-cloud 推送测试", html)
+            elif t == "WxPusher":
+                pusher._wxpusher_push(ch, "work-cloud 推送测试", html)
+            elif t == "Server":
+                pusher._server_push(ch, "work-cloud 推送测试",
+                                    "推送测试成功")
+            else:
+                errors.append(f"{t}: 暂不支持在线测试")
+                continue
+            ok_channels.append(t)
+        except Exception as exc:  # noqa: BLE001 - 渠道错误汇总返回
+            errors.append(f"{t}: {str(exc)[:120]}")
+    _append_audit("push_test", account_id,
+                  {"channels": [c.get("type") for c in channels],
+                   "ok": ok_channels})
+    if ok_channels:
+        msg = f"测试消息已发送（{'、'.join(ok_channels)}），请查收微信"
+        if errors:
+            msg += "；" + "；".join(errors)
+        return {"ok": True, "message": msg}, 200
+    return {"error": "测试发送失败：" + "；".join(errors)}, 502
 
 
 def _new_session() -> str:
@@ -1006,6 +1102,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             resp, code = perform_list_models(
                 m3.group(1), payload if isinstance(payload, dict) else {})
+            self._json(resp, code)
+            return
+
+        m4 = re.match(r"^/api/accounts/(acct_[A-Za-z0-9]{6,16})/push-test$",
+                      parsed.path)
+        if m4:
+            cookie_token = _parse_cookie(self.headers.get("Cookie", ""))
+            if not _valid_session(cookie_token):
+                self._json({"error": "not authenticated"}, 401)
+                return
+            if not _csrf_valid(cookie_token,
+                               self.headers.get("X-CSRF-Token", "")):
+                self._json({"error": "csrf token missing or invalid"}, 403)
+                return
+            resp, code = perform_push_test(m4.group(1))
             self._json(resp, code)
             return
 
