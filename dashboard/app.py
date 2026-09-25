@@ -340,6 +340,7 @@ def _account_ai_report_state(config_file: str) -> dict:
     rs = cfg.get("reportSettings") or {}
     for k in ("daily", "weekly", "monthly"):
         state[f"{k}_enabled"] = bool((rs.get(k) or {}).get("enabled"))
+    state["location"] = dict((cfg.get("clockIn") or {}).get("location") or {})
     return state
 
 
@@ -351,7 +352,9 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
     """更新账户的 AI apikey/模型/接口 与 日报/周报/月报开关（写 user/*.json）。
 
     payload 可选键：ai_apikey / ai_model / ai_apiurl /
-    daily_enabled / weekly_enabled / monthly_enabled。
+    daily_enabled / weekly_enabled / monthly_enabled /
+    loc_address / loc_latitude / loc_longitude / loc_province /
+    loc_city / loc_area（模拟定位，写 config.clockIn.location）。
     至少提供一个键，否则 400。审计不记录 apikey 明文。
     """
     if not _ACCOUNT_ID_RE.match(str(account_id or "")):
@@ -364,7 +367,11 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
                   "ai_apiurl": "apiUrl"}
     allowed_flags = {"daily_enabled": "daily", "weekly_enabled": "weekly",
                      "monthly_enabled": "monthly"}
-    keys = [k for k in list(allowed_ai) + list(allowed_flags) if k in payload]
+    allowed_loc = {"loc_address": "address", "loc_latitude": "latitude",
+                   "loc_longitude": "longitude", "loc_province": "province",
+                   "loc_city": "city", "loc_area": "area"}
+    keys = [k for k in list(allowed_ai) + list(allowed_flags)
+            + list(allowed_loc) if k in payload]
     if not keys:
         return {"error": "没有需要更新的字段"}, 400
 
@@ -376,7 +383,7 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             cfg = data.get("config") or {}
-            changed = {"ai": False, "report": False}
+            changed = {"ai": False, "report": False, "loc": False}
             masked = {}
             for k in keys:
                 if k in allowed_ai:
@@ -388,6 +395,21 @@ def perform_update_account_config(account_id: str, payload: dict) -> tuple:
                     if k == "ai_apikey":
                         masked["apikey"] = _mask_key(value)
                     changed["ai"] = True
+                elif k in allowed_loc:
+                    value = str(payload.get(k) or "").strip()
+                    if k in ("loc_latitude", "loc_longitude"):
+                        try:
+                            num = float(value)
+                        except ValueError:
+                            return {"error": "经纬度必须是数字"}, 400
+                        lim = 90.0 if k == "loc_latitude" else 180.0
+                        if not (-lim <= num <= lim):
+                            return {"error": "经纬度超出范围"}, 400
+                        value = f"{num:.6f}"  # 统一 6 位小数（工学云口径）
+                    loc = cfg.setdefault("clockIn", {}).setdefault(
+                        "location", {})
+                    loc[allowed_loc[k]] = value
+                    changed["loc"] = True
                 else:
                     enabled = bool(payload.get(k))
                     rs = cfg.setdefault("reportSettings", {})

@@ -100,6 +100,8 @@
   .seg.s-unknown { background: var(--orange); }
   .seg.s-skipped { background: var(--gray); }
 </style>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -210,6 +212,26 @@
       <div style="margin-top:12px">
         <button class="btn" onclick="saveTasksAi()">保存全部设置</button>
         <span class="meta" style="margin-left:8px">任务开关保存后立即生效；下轮执行可用「立即运行」验证</span>
+      </div>
+    </div>
+    <div class="card"><h2>模拟定位</h2>
+      <div class="meta" style="margin-bottom:8px">地图选点（GCJ-02，与腾讯地图/工学云同坐标系）；保存后打卡即模拟到该位置，每次自动 ±1 米浮动。也可直接粘贴坐标</div>
+      <div id="loc-map" style="height:320px;border-radius:8px;overflow:hidden;background:#1a2130"></div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;align-items:center">
+        <label>纬度 <input id="loc-lat" type="text" placeholder="35.424247" style="width:120px;font-family:monospace;padding:6px"></label>
+        <label>经度 <input id="loc-lon" type="text" placeholder="116.283722" style="width:120px;font-family:monospace;padding:6px"></label>
+        <a id="loc-tencent-link" href="#" target="_blank" rel="noopener" class="meta" style="display:none">在腾讯地图中查看所选点 ↗</a>
+      </div>
+      <label class="lbl" style="display:block;margin:8px 0 4px">详细地址</label>
+      <input id="loc-address" type="text" placeholder="山东省 · 济宁市 · 嘉祥县 · 在卧龙山街道谷庄村附近" style="width:100%;max-width:560px;box-sizing:border-box;padding:8px">
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px">
+        <label>省 <input id="loc-province" type="text" style="width:110px;padding:6px"></label>
+        <label>市 <input id="loc-city" type="text" style="width:110px;padding:6px"></label>
+        <label>区/县 <input id="loc-area" type="text" style="width:110px;padding:6px"></label>
+      </div>
+      <div style="margin-top:10px">
+        <button class="btn" onclick="saveLocation()">保存模拟定位</button>
+        <span id="loc-msg" class="meta" style="margin-left:8px"></span>
       </div>
     </div>
     <div class="card"><h2>今日任务</h2><div id="detail-today"></div></div>
@@ -381,6 +403,95 @@ async function loadModels(){
   } catch (e) {
     msg.textContent = "请求失败: " + e.message; msg.style.color = "var(--red)";
   }
+}
+
+/* ============ Stage 19: 模拟定位选点（GCJ-02 瓦片 + 腾讯地图校验链接） ============ */
+let locMap = null, locMarker = null;
+function initLocationMap(loc){
+  const la = parseFloat(loc && loc.latitude), lo = parseFloat(loc && loc.longitude);
+  const center = (isFinite(la) && isFinite(lo)) ? [la, lo] : [35.424247, 116.283722];
+  document.getElementById("loc-lat").value = isFinite(la) ? String(loc.latitude) : "";
+  document.getElementById("loc-lon").value = isFinite(lo) ? String(loc.longitude) : "";
+  document.getElementById("loc-address").value = (loc && loc.address) || "";
+  document.getElementById("loc-province").value = (loc && loc.province) || "";
+  document.getElementById("loc-city").value = (loc && loc.city) || "";
+  document.getElementById("loc-area").value = (loc && loc.area) || "";
+  updateTencentLink();
+  setTimeout(() => {
+    if (typeof L === "undefined") return;  // CDN 不可用时降级为纯表单
+    if (!locMap) {
+      locMap = L.map("loc-map").setView(center, 14);
+      // 高德栅格瓦片：GCJ-02 坐标系，与腾讯地图/工学云一致
+      L.tileLayer("https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}", {
+        subdomains: ["1", "2", "3", "4"], maxZoom: 18,
+        attribution: "© 高德地图（GCJ-02）"
+      }).addTo(locMap);
+      locMap.on("click", e => setLocPoint(e.latlng.lat, e.latlng.lng));
+    } else {
+      locMap.setView(center, 14);
+    }
+    if (locMarker) locMarker.remove();
+    locMarker = L.marker(center, {draggable: true}).addTo(locMap);
+    locMarker.on("dragend", () => {
+      const pt = locMarker.getLatLng();
+      setLocPoint(pt.lat, pt.lng);
+    });
+    setTimeout(() => locMap.invalidateSize(), 150);
+  }, 60);
+}
+function setLocPoint(lat, lon){
+  lat = Math.round(lat * 1e6) / 1e6;
+  lon = Math.round(lon * 1e6) / 1e6;
+  document.getElementById("loc-lat").value = lat.toFixed(6);
+  document.getElementById("loc-lon").value = lon.toFixed(6);
+  updateTencentLink();
+}
+function updateTencentLink(){
+  const a = document.getElementById("loc-tencent-link");
+  if (!a) return;
+  const la = parseFloat(document.getElementById("loc-lat").value);
+  const lo = parseFloat(document.getElementById("loc-lon").value);
+  if (isFinite(la) && isFinite(lo)) {
+    // 官方腾讯地图 URI API：在腾讯地图中打开所选点做视觉校验
+    a.href = "https://apis.map.qq.com/uri/v1/marker?marker=coord:"
+             + la + "," + lo + ";title:模拟定位点";
+    a.style.display = "";
+  } else {
+    a.style.display = "none";
+  }
+}
+async function saveLocation(){
+  const id = curAcctId || (decodeURIComponent(location.pathname.split("/").pop() || ""));
+  if (!id.startsWith("acct_")) return;
+  const la = parseFloat(document.getElementById("loc-lat").value);
+  const lo = parseFloat(document.getElementById("loc-lon").value);
+  const msg = document.getElementById("loc-msg");
+  if (!isFinite(la) || !isFinite(lo) || Math.abs(la) > 90 || Math.abs(lo) > 180) {
+    msg.textContent = "经纬度无效（可在地图上点选）"; msg.style.color = "var(--red)"; return;
+  }
+  if (!CSRF) await initCsrf();
+  msg.textContent = "保存中…"; msg.style.color = "var(--orange)";
+  const resp = await fetch(`/api/accounts/${id}/config`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-CSRF-Token": CSRF},
+    body: JSON.stringify({
+      loc_latitude: la.toFixed(6), loc_longitude: lo.toFixed(6),
+      loc_address: document.getElementById("loc-address").value.trim(),
+      loc_province: document.getElementById("loc-province").value.trim(),
+      loc_city: document.getElementById("loc-city").value.trim(),
+      loc_area: document.getElementById("loc-area").value.trim(),
+    }),
+  });
+  let body = {};
+  try { body = await resp.json(); } catch {}
+  if (resp.status === 401) { location.href = "/login"; return; }
+  if (resp.status === 403) {
+    await initCsrf();
+    msg.textContent = "CSRF 校验失败，已刷新令牌，请重试"; msg.style.color = "var(--red)";
+    return;
+  }
+  msg.textContent = body.message || body.error || (resp.ok ? "已保存" : "保存失败");
+  msg.style.color = resp.ok ? "var(--green)" : "var(--red)";
 }
 
 async function saveTasksAi(){
@@ -555,6 +666,9 @@ async function showAccountDetail(id){
   const ui = document.getElementById("ai-url"); if (ui) ui.value = p.ai_apiurl || "";
   const mi = document.getElementById("ai-model"); if (mi) mi.value = p.ai_model || "";
   document.getElementById("ai-provider").value = "";
+  // Stage 19: 模拟定位卡片回填 + 地图初始化
+  initLocationMap(p.location || {});
+  const lm = document.getElementById("loc-msg"); if (lm) { lm.textContent = ""; }
 
   const today = d.today;
   document.getElementById("detail-today").innerHTML = (today.tasks.length || today.ledger_runs.length)
