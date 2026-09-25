@@ -202,6 +202,24 @@ def perform_account_action(account_id: str, action: str,
     return {"error": f"unknown action: {action}"}, 400
 
 
+def _inherit_ai_defaults() -> dict:
+    """新账号 AI 配置默认继承主账号（me）的模型/接口/API Key。
+
+    2026-09-25 用户口径：API Key 默认用 me 的。读取 user/me.json 的
+    ai 段整体复制（含 model/apiUrl/apikey）；不存在或缺段则返回空
+    dict，由调用方回落到内置默认。
+    """
+    try:
+        with open(os.path.join(PROJECT, "user", "me.json"),
+                  encoding="utf-8") as f:
+            ai = json.load(f).get("config", {}).get("ai", {})
+        if isinstance(ai, dict) and ai.get("apikey"):
+            return {k: ai.get(k, "") for k in ("model", "apikey", "apiUrl")}
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    return {}
+
+
 def _default_account_config(phone: str, password: str) -> dict:
     """新账号默认配置（登录验证通过后落盘 user/{user_key}.json）。
 
@@ -226,8 +244,10 @@ def _default_account_config(phone: str, password: str) -> dict:
             "weekly": {"enabled": True, "imageCount": 0, "submitTime": 5},
             "monthly": {"enabled": True, "imageCount": 0, "submitTime": 28},
         },
-        "ai": {"model": "gpt-4o-mini", "apikey": "",
-               "apiUrl": "https://api.openai.com/"},
+        # AI 配置默认继承 me（model/apiUrl/apikey 整体复制）
+        "ai": _inherit_ai_defaults() or {
+            "model": "gpt-4o-mini", "apikey": "",
+            "apiUrl": "https://api.openai.com/"},
         "pushNotifications": [],
         "device": {"brand": "TA J20", "systemVersion": "17",
                    "Platform": "Android", "isPhysical": True},
