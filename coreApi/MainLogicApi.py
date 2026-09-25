@@ -291,7 +291,10 @@ class ApiClient:
             "loginType": "android",
             "uuid": str(uuid.uuid4()).replace("-", ""),
             "device": "android",
-            "version": "5.16.0",
+            # 2026-09: 服务端校验客户端版本并弃用 v5/save 打卡接口
+            # （报"请到应用商店下载最新版本"）；对齐社区 2026-08 验证
+            # 可用的版本号 5.31.6（JiangRTTTR/gongxueyun-auto-punch-in-out）
+            "version": "5.31.6",
             "t": aes_encrypt(str(int(time.time() * 1000))),
         }
         rsp = self._post_request(url, self.DEFAULT_HEADERS, data)
@@ -444,7 +447,8 @@ class ApiClient:
         planId = self.config.get_value("planInfo.planId")
 
         if self.config.get_value("userInfo.userType") != "teacher":
-            url = "attendence/clock/v5/save"
+            # 2026-09: v5/save 已被服务端弃用（版本过低拦截），升级 v6
+            url = "attendence/clock/v6/save"
             sign_data = [
                 self.config.get_value("config.device"),
                 checkin_info.get("type"),
@@ -464,7 +468,7 @@ class ApiClient:
             "attendanceType", "username", "attachments", "userId", "isSYN", 
             "studentId", "applyState", "studentNumber", "memberNumber", "headImg", 
             "attendenceTime", "depName", "majorName", "className", "logDtoList", 
-            "isBeyondFence", "practiceAddress", "tpJobId", "t"
+            "isBeyondFence", "practiceAddress", "tpJobId", "t", "version"
         ]
         data = dict.fromkeys(keys, None)
 
@@ -480,6 +484,8 @@ class ApiClient:
             "userId": self.config.get_value("userInfo.userId"),
             "lastDetailAddress": checkin_info.get("lastDetailAddress"),
             "t": aes_encrypt(str(int(time.time() * 1000))),
+            # 2026-09: v6/save 要求 payload 携带客户端版本
+            "version": "5.31.6",
         })
 
         data.update(self.config.get_value("config.clockIn.location"))
@@ -531,6 +537,8 @@ class ApiClient:
             "authorization": self.config.get_value("userInfo.token"),
             "userid": self.config.get_value("userInfo.userId"),
             "rolekey": self.config.get_value("userInfo.roleKey"),
+            # 2026-09: 服务端新增版本校验，认证请求头必须携带 version
+            "version": "5.31.6",
         })
         
         if sign_data:
