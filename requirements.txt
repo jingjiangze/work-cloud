@@ -3,7 +3,7 @@ certifi==2024.12.14
 cffi==1.17.1
 charset-normalizer==3.4.1
 coloredlogs==15.0.1
-cryptography==44.0.0
+cryptography==50.0.2
 flatbuffers==24.12.23
 humanfriendly==10.0
 idna==3.10
