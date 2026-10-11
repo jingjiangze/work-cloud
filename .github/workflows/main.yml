@@ -10,10 +10,11 @@ on:
     - cron: "0 9 * * *" # UTC 09:00 / 北京时间 17:00
     - cron: "0 10 * * *" # UTC 10:00 / 北京时间 18:00
 
-# 配置并发控制，避免任务重叠执行
+# 配置并发控制：排队执行（RISK-A02：不取消进行中的运行，
+# 避免打卡执行到一半被强杀产生"已登录未提交"状态）
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
