@@ -11,6 +11,8 @@ from email.utils import formataddr
 
 import requests
 
+from util.request_helper import post_with_retry
+
 # 尝试导入主模块的日志上下文，失败则创建本地版本
 try:
     from main import _log_ctx
@@ -32,16 +34,16 @@ class MessagePusher:
         """
         self.push_config = push_config
 
-    def push(self, results: List[Dict[str, Any]]) -> None:
-        """
-        推送消息。
+    def push(self, results: List[Dict[str, Any]], level: str = None) -> None:
+        """推送消息（Stage 9: 通知分级 INFO/WARNING/ERROR）。
 
         Args:
-            results (List[Dict[str, Any]]): 任务执行结果列表。
-
-        Returns:
-            bool: 是否推送成功。
+            results: 任务执行结果列表。
+            level: 指定等级；None 时自动判定——
+                   全部成功 -> INFO；任一失败 -> ERROR；其余（含全跳过）-> WARNING。
         """
+        if not results:
+            return
         skip_count = sum(1 for result in results
                          if result.get("status") == "skip")
         if skip_count == len(results):
@@ -49,9 +51,11 @@ class MessagePusher:
             return
 
         success_count = sum(r.get("status") == "success" for r in results)
+        fail_count = sum(r.get("status") == "fail" for r in results)
+        if level is None:
+            level = "INFO" if fail_count == 0 and success_count == len(results)                 else ("ERROR" if fail_count else "WARNING")
         status_emoji = "🎉" if success_count == len(results) else "📊"
-        title = f"{status_emoji} 工学云报告 ({success_count}/{len(results)})"
-
+        title = f"{status_emoji} [{level}] 工学云报告 ({success_count}/{len(results)})"
         for service_config in self.push_config:
             if service_config.get("enabled", False):
                 service_type = service_config["type"]
@@ -81,6 +85,34 @@ class MessagePusher:
                     logger.error(f"{service_type} 消息推送失败: {str(e)}")
                     continue
 
+    def push_custom(self, title: str, markdown: str, html: str = None,
+                    level: str = "INFO") -> None:
+        """推送自定义内容（Stage 13: 跨账户聚合摘要等场景）。
+
+        Args:
+            title: 消息标题。
+            markdown: Markdown 正文（NotifyX/Server/AnPush 使用）。
+            html: HTML 正文（PushPlus/WxPusher/SMTP 使用）；None 时退回 markdown。
+            level: 通知等级 INFO/WARNING/ERROR。
+        """
+        html = html or markdown
+        for service_config in self.push_config:
+            if not service_config.get("enabled", False):
+                continue
+            service_type = service_config["type"]
+            try:
+                if service_type in ("NotifyX", "Server", "AnPush"):
+                    getattr(self, f"_{service_type.lower()}_push")(
+                        service_config, title, markdown)
+                elif service_type in ("PushPlus", "WxPusher", "SMTP"):
+                    getattr(self, f"_{service_type.lower()}_push")(
+                        service_config, title, html)
+                else:
+                    logger.warning(f"不支持的推送服务类型: {service_type}")
+            except Exception as e:
+                logger.error(f"{service_type} 消息推送失败: {str(e)}")
+                continue
+
     def _server_push(self, config: dict[str, Any], title: str, content: str):
         """Server酱 推送
 
@@ -92,7 +124,7 @@ class MessagePusher:
         url = f'https://sctapi.ftqq.com/{config["sendKey"]}.send'
         data = {"title": title, "desp": content}
 
-        rsp = requests.post(url, data=data).json()
+        rsp = post_with_retry(url, data=data).json()
         if rsp.get("code") == 0:
             logger.info("Server酱推送成功")
         else:
@@ -109,7 +141,7 @@ class MessagePusher:
         url = f'https://www.pushplus.plus/send/{config["token"]}'
         data = {"title": title, "content": content}
 
-        rsp = requests.post(url, data=data).json()
+        rsp = post_with_retry(url, data=data).json()
         if rsp.get("code") == 200:
             logger.info("PushPlus推送成功")
         else:
@@ -132,7 +164,7 @@ class MessagePusher:
             "to": config["to"],
         }
 
-        rsp = requests.post(url, data=data).json()
+        rsp = post_with_retry(url, data=data).json()
         if rsp.get("code") == 200:
             logger.info("AnPush推送成功")
         else:
@@ -155,7 +187,7 @@ class MessagePusher:
             "spt": config["spt"],
         }
 
-        rsp = requests.post(url, json=data).json()
+        rsp = post_with_retry(url, json=data).json()
         if rsp.get("code") == 1000:
             logger.info("WxPusher推送成功")
         else:
@@ -179,7 +211,7 @@ class MessagePusher:
         # 添加邮件内容
         msg.attach(MIMEText(content, "html", "utf-8"))
 
-        with smtplib.SMTP_SSL(config["host"], config["port"]) as server:
+        with smtplib.SMTP_SSL(config["host"], config["port"], timeout=15) as server:
             server.login(config["username"], config["password"])
             server.send_message(msg)
             logger.info(f"邮件已发送成功")
@@ -205,7 +237,7 @@ class MessagePusher:
         if "team" in config:
             data["team"] = config["team"]
 
-        rsp = requests.post(url, json=data).json()
+        rsp = post_with_retry(url, json=data).json()
         if rsp.get("status") == "queued":
             logger.info("NotifyX推送成功")
         else:

@@ -1,8 +1,10 @@
 import base64
 import json
 import logging
+import os
 import random
 import struct
+import threading
 
 from cv2.typing import MatLike
 import numpy as np
@@ -10,6 +12,27 @@ import onnxruntime as ort
 import cv2
 
 logger = logging.getLogger(__name__)
+
+# Stage 7 (RISK-C07): 模型目录用绝对路径（不再依赖 CWD），会话进程级缓存
+_MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+YOLO_MODEL_PATH = os.path.join(_MODEL_DIR, "yolov5n.onnx")
+OCR_MODEL_PATH = os.path.join(_MODEL_DIR, "ocr.onnx")
+
+_session_cache: dict = {}
+_session_lock = threading.Lock()
+
+
+def _get_session(model_path: str, use_gpu: bool = False):
+    """进程级缓存 InferenceSession，避免每次识别重复加载模型。"""
+    key = (model_path, use_gpu)
+    with _session_lock:
+        session = _session_cache.get(key)
+        if session is None:
+            providers = (["CUDAExecutionProvider"] if use_gpu
+                         else ["CPUExecutionProvider"])
+            session = ort.InferenceSession(model_path, providers=providers)
+            _session_cache[key] = session
+        return session
 
 
 def calculate_precise_slider_distance(target_start_x: int, target_end_x: int,
@@ -195,9 +218,7 @@ def detect_objects(model_path: str,
             (2, 0, 1)), axis=0).astype(np.float32) / 255.0)
 
         # 加载模型并运行
-        providers = ["CUDAExecutionProvider"
-                     ] if use_gpu else ["CPUExecutionProvider"]
-        session = ort.InferenceSession(model_path, providers=providers)
+        session = _get_session(model_path, use_gpu)
         result = session.run(None, {session.get_inputs()[0].name: input_img})
 
         # 解析模型输出并应用非极大值抑制（NMS）
@@ -243,12 +264,8 @@ def predict_ocr(model_path: str,
     :raises: Exception 如果模型加载或推理过程中发生错误。
     """
     try:
-        # 加载ONNX模型
-        session = ort.InferenceSession(
-            model_path,
-            providers=(["CUDAExecutionProvider"]
-                       if use_gpu else ["CPUExecutionProvider"]),
-        )
+        # 加载ONNX模型（进程级缓存）
+        session = _get_session(model_path, use_gpu)
 
         # 预处理图片
         image = np.expand_dims(
@@ -779,15 +796,15 @@ def recognize_clickWord_captcha(target: str, wordlist: list) -> str:
     image = cv2.imdecode(np.frombuffer(target_bytes, dtype=np.uint8),
                          cv2.IMREAD_COLOR)
 
-    bboxes = detect_objects("./models/yolov5n.onnx", image)
+    bboxes = detect_objects(YOLO_MODEL_PATH, image)
 
     # 识别每个文本框中的文本，并存储为字典以便快速查找
     recognized_dict = {}
     for bbox in bboxes:
         try:
             x_min, y_min, x_max, y_max = bbox
-            text = predict_ocr("./models/ocr.onnx", image[y_min:y_max,
-                                                          x_min:x_max])
+            text = predict_ocr(OCR_MODEL_PATH, image[y_min:y_max,
+                                                     x_min:x_max])
             recognized_dict[text] = bbox
         except Exception as e:
             logger.warning(f"处理文本框时出错: {e}")

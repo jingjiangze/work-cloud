@@ -38,4 +38,28 @@ coverage.xml
 # Cython debug symbols
 cython_debug/
 
-user/test.json
+# ---------- 凭据与隐私（提交前必须隔离，勿删）----------
+# 账号配置：含工学云明文密码、手机号、登录 JWT、AI apikey、推送 token
+user/*.json
+user/*.json.bak*
+!user/example.json
+# 看板登录口令（明文）
+dashboard/password.txt
+# 运行数据：台账/历史/风控/审计，含真实打卡记录与身份信息
+data/
+# 日志：可能含手机号、token、请求体
+logs/
+# 报告正文与上传件
+reports/
+# 一次性备份、参考件、临时脚本
+user/_bak*/
+user/_backup*/
+_backup_pre_*/
+_ref_*.py
+*.bak
+*.bak-*
+*.bak_*
+
+# 二维码等一次性产物
+*.png
+!images/*.png

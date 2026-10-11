@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 import time
 import uuid
 import random
@@ -13,6 +12,12 @@ from util.Config import ConfigManager
 from util.CryptoUtils import create_sign, aes_encrypt, aes_decrypt
 from util.CaptchaUtils import recognize_blockPuzzle_captcha, recognize_clickWord_captcha
 from util.HelperFunctions import get_current_month_info
+from util.request_helper import is_retryable_exception
+from models.risk_ledger import (
+    record_event,
+    EVENT_CAPTCHA_REQUIRED,
+    EVENT_NETWORK_RETRY,
+)
 
 # 尝试导入主模块的日志上下文，失败则创建本地版本
 try:
@@ -21,6 +26,40 @@ except ImportError:
     _log_ctx = threading.local()
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_location_jitter(data: Dict[str, Any]) -> None:
+    """2026-09 风控加固：打卡位置浮动（借鉴 XuanRan 方案）。
+
+    每次打卡删除经纬度最后一位并随机补一位数字，坐标在 ±0.000009°
+    （约 ±1 米）内变化，避免每次提交完全相同坐标的机器特征。
+    data 中 latitude/longitude 为合法数字字符串才处理；
+    data["_jitter_disabled"]=True 时跳过（供测试与显式关闭场景）。
+    """
+    if data.get("_jitter_disabled"):
+        return
+    for coord_key in ("latitude", "longitude"):
+        coord = data.get(coord_key)
+        if isinstance(coord, str) and len(coord) >= 6 and coord[-1].isdigit():
+            data[coord_key] = coord[:-1] + str(random.randint(0, 9))
+
+
+class CaptchaExhaustedError(Exception):
+    """验证码处理超限（L4 熔断）。
+
+    验证码是异常事件而非普通重试场景：获取/识别失败达到上限后立即停止
+    当前任务并向上传播，由调用方决定是否阻断后续任务（失败保护，
+    而非自动突破）。
+    """
+
+
+class SubmitUnknownError(Exception):
+    """提交类请求结果未知（L2）。
+
+    触发条件：提交类 POST 发出后未收到服务端响应（超时/连接重置/传输中断），
+    无法确定服务端是否已受理 —— 此时**不得**判定为 FAILED，也**不得**盲目重试。
+    由调用方进行只读核验（L3）后收敛为 SUCCESS / FAILED / UNKNOWN。
+    """
 
 
 class ApiClient:
@@ -35,23 +74,42 @@ class ApiClient:
         "host": "api.moguding.net:9000",
     }
 
-    def __init__(self, config: ConfigManager):
+    def __init__(self, config: ConfigManager, context=None):
         """
         初始化ApiClient实例。
 
         Args:
             config (ConfigManager): 用于管理配置的实例。
+            context: AccountContext（Stage 4 起显式绑定账户；None 时
+                     legacy 行为不变，账户标识退回 user_key 属性）。
         """
         self.config = config
+        self.context = context
+        self.account_id = context.account_id if context else None
         self.max_retries = 5  # 控制重新尝试的次数
         self.session = requests.Session()
         self.session.headers.update(self.DEFAULT_HEADERS)
+        # Stage 4: 进程级会话登记簿（重登只更新本账户会话）
+        from services.session_manager import default_session_manager
+        self.session_manager = default_session_manager()
+
+    def _on_token_obtained(self) -> None:
+        """登录成功拿到新 token 后登记会话（仅本账户）。"""
+        if not self.account_id:
+            return
+        try:
+            token = self.config.get_value("userInfo.token") or ""
+            self.session_manager.register(self.account_id, token)
+        except Exception as e:  # 会话登记失败绝不影响业务
+            logger.warning(f"会话登记失败（忽略）: {e}")
 
     def _post_request(
         self,
         url: str,
         headers: Dict[str, str],
         data: Dict[str, Any],
+        submit: bool = False,
+        allow_302: bool = False,
     ) -> Dict[str, Any]:
         """
         发送POST请求，并处理请求过程中可能发生的错误。
@@ -74,9 +132,18 @@ class ApiClient:
                 msg = rsp.get("msg", "未知错误")
 
                 # 特殊情况处理
+                # L4 修正：allow_302=True 时把 302（行为验证码）正常返回给
+                # 提交方处理 —— 否则 submit_clock_in 的验证码分支是死代码
                 if code == 200:
                     if msg == "302":
-                        raise ValueError("打卡失败，触发行为验证码")
+                        # L6: 行为验证码出现属于风险事件，记录台账
+                        record_event(
+                            getattr(self, "user_key", "unknown"), "request",
+                            EVENT_CAPTCHA_REQUIRED, stage=f"attempt {attempt + 1}",
+                            action="allow_302" if allow_302 else "raise",
+                            result="服务端要求行为验证码")
+                        if not allow_302:
+                            raise ValueError("打卡失败，触发行为验证码")
                     return rsp
                 
                 if code == 6111:
@@ -96,22 +163,58 @@ class ApiClient:
                     else:
                         raise ValueError(msg)
                 
+                # server intermittently rejects with "please download the latest APP"
+                # (cluster nodes disagree on the minimum version): re-login and retry
+                if "最新版本" in msg and attempt < self.max_retries - 1:
+                    wait_time = 1 * (2 ** attempt)
+                    logger.warning(f"server requires latest APP (intermittent), re-login and retry in {wait_time}s")
+                    time.sleep(wait_time)
+                    self.login()
+                    headers["authorization"] = self.config.get_value("userInfo.token")
+                    continue
                 raise ValueError(msg)
 
             except (requests.RequestException, ValueError) as e:
-                # 如果是最后一次尝试，或者遇到无法重试的错误（如验证码），则抛出异常
-                is_last_attempt = attempt >= self.max_retries - 1
-                error_str = str(e)
-                
-                # 包含中文字符的错误通常是业务错误，或者已经达到最大重试次数
-                if re.search(r"[\u4e00-\u9fff]", error_str) and "Token失效" not in error_str:
-                     raise ValueError(error_str)
-                
-                if is_last_attempt:
-                    raise ValueError(error_str)
+                # raise_for_status 抛出的 HTTPError 兜底补挂 response，
+                # 保证状态码判断准确（正常 requests 会自动挂载）
+                if isinstance(e, requests.exceptions.HTTPError) \
+                        and getattr(e, "response", None) is None:
+                    try:
+                        e.response = response
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                # L2: 提交类请求结果无法确定 → UNKNOWN，不重试不判失败
+                #  - 未收到响应（超时/重置/中断）→ UNKNOWN
+                #  - 5xx（网关/后端是否受理未知）→ UNKNOWN
+                #  - 4xx：服务端明确拒绝 → 走下方业务失败路径
+                if submit and not isinstance(e, ValueError):
+                    code = getattr(getattr(e, "response", None), "status_code", None)
+                    if not isinstance(e, requests.exceptions.HTTPError):
+                        raise SubmitUnknownError(
+                            f"提交后未收到服务端响应: {e}") from e
+                    if code is not None and code >= 500:
+                        raise SubmitUnknownError(
+                            f"提交后服务端返回 {code}，受理状态未知: {e}") from e
+
+                # Stage 4: 精确重试分类（替代中文启发式，RISK-C04）
+                # - 业务错误(ValueError)不重试
+                # - 仅对"确定未到达服务端"的错误重试，缓解重复提交（RISK-B06）
+                if isinstance(e, ValueError):
+                    raise
+
+                if not is_retryable_exception(e):
+                    raise ValueError(str(e))
+
+                if attempt >= self.max_retries - 1:
+                    raise ValueError(str(e))
 
                 wait_time = 1 * (2 ** attempt)
                 logger.warning(f"请求失败: {e}，重试 {attempt + 1}/{self.max_retries}，等待 {wait_time:.2f} 秒")
+                record_event(
+                    getattr(self, "user_key", "unknown"), "request",
+                    EVENT_NETWORK_RETRY, stage=f"attempt {attempt + 1}/{self.max_retries}",
+                    action=f"退避{wait_time:.1f}s", result=str(e))
                 time.sleep(wait_time)
         
         raise ValueError("请求失败，超过最大重试次数")
@@ -151,7 +254,8 @@ class ApiClient:
                 logger.warning(f"滑块验证尝试 {attempt + 1}/{max_attempts} 失败: {e}")
                 time.sleep(random.uniform(1, 3))
                 
-        raise Exception("通过滑块验证码失败")
+        raise CaptchaExhaustedError(
+            f"滑块验证码连续 {max_attempts} 次未通过，熔断停止")
 
     def solve_click_word_captcha(self, max_retries: int = 5) -> str:
         """通过点选验证码（clickWord）"""
@@ -199,7 +303,8 @@ class ApiClient:
                 logger.warning(f"点选验证尝试 {retry + 1}/{max_retries} 失败: {e}")
                 time.sleep(random.uniform(1, 3))
 
-        raise Exception("通过点选验证码失败")
+        raise CaptchaExhaustedError(
+            f"点选验证码连续 {max_retries} 次未通过，熔断停止")
 
     def login(self) -> None:
         """执行用户登录操作"""
@@ -211,12 +316,17 @@ class ApiClient:
             "loginType": "android",
             "uuid": str(uuid.uuid4()).replace("-", ""),
             "device": "android",
-            "version": "5.16.0",
+            # 2026-09: 服务端校验客户端版本并弃用 v5/save 打卡接口
+            # （报"请到应用商店下载最新版本"）；对齐社区 2026-08 验证
+            # 可用的版本号 5.31.6（JiangRTTTR/gongxueyun-auto-punch-in-out）
+            "version": "5.31.6",
             "t": aes_encrypt(str(int(time.time() * 1000))),
         }
         rsp = self._post_request(url, self.DEFAULT_HEADERS, data)
         user_info = json.loads(aes_decrypt(rsp.get("data", "")))
         self.config.update_config(user_info, "userInfo")
+        # Stage 4: 重登只登记本账户会话，不影响其他账户
+        self._on_token_obtained()
 
     def fetch_internship_plan(self) -> None:
         """获取当前用户的实习计划"""
@@ -301,7 +411,7 @@ class ApiClient:
             "jobId": report_info.get("jobId", ""),
             "attachments": report_info.get("attachments", ""),
             "formFieldDtoList": report_info.get("formFieldDtoList", []),
-            "fieldEntityList": [],
+            "fieldEntityList": report_info.get("formFieldDtoList", []) or [],
             "isWarning": 0,
             "t": aes_encrypt(str(int(time.time() * 1000))),
         })
@@ -311,7 +421,7 @@ class ApiClient:
             if key in report_info:
                 data[key] = report_info[key]
 
-        self._post_request(url, headers, data)
+        self._post_request(url, headers, data, submit=True)
 
     def get_weeks_date(self) -> List[Dict[str, Any]]:
         """获取本周周报周期信息"""
@@ -361,10 +471,18 @@ class ApiClient:
         sign_data = None
         planId = self.config.get_value("planInfo.planId")
 
+        # device 可能因配置模板/手改成为 dict，签名与 payload 必须使用
+        # 同一字符串（服务端按收到的 device 字段重算签名，内容不透明）
+        device_info = self.config.get_value("config.device")
+        if device_info is not None and not isinstance(device_info, str):
+            device_info = json.dumps(device_info, ensure_ascii=False,
+                                     separators=(",", ":"))
+
         if self.config.get_value("userInfo.userType") != "teacher":
-            url = "attendence/clock/v5/save"
+            # 2026-09: v5/save 已被服务端弃用（版本过低拦截），升级 v6
+            url = "attendence/clock/v6/save"
             sign_data = [
-                self.config.get_value("config.device"),
+                device_info,
                 checkin_info.get("type"),
                 planId,
                 self.config.get_value("userInfo.userId"),
@@ -382,7 +500,7 @@ class ApiClient:
             "attendanceType", "username", "attachments", "userId", "isSYN", 
             "studentId", "applyState", "studentNumber", "memberNumber", "headImg", 
             "attendenceTime", "depName", "majorName", "className", "logDtoList", 
-            "isBeyondFence", "practiceAddress", "tpJobId", "t"
+            "isBeyondFence", "practiceAddress", "tpJobId", "t", "version"
         ]
         data = dict.fromkeys(keys, None)
 
@@ -390,25 +508,36 @@ class ApiClient:
             "country": "中国",
             "createTime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "description": checkin_info.get("description", None),
-            "device": self.config.get_value("config.device"),
+            "device": device_info,
             "state": "NORMAL",
             "type": checkin_info.get("type"),
             "planId": planId,
             "attachments": checkin_info.get("attachments", None),
             "userId": self.config.get_value("userInfo.userId"),
             "lastDetailAddress": checkin_info.get("lastDetailAddress"),
+            "attendenceTime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "t": aes_encrypt(str(int(time.time() * 1000))),
+            # 2026-09: v6/save 要求 payload 携带客户端版本
+            "version": "5.31.6",
         })
 
         data.update(self.config.get_value("config.clockIn.location"))
 
+        # 2026-09 风控加固：位置浮动（借鉴 XuanRan 打卡位置浮动方案）
+        # 配置 clockIn.locationJitter=false 可显式关闭。
+        _apply_location_jitter(data)
+
         headers = self._get_authenticated_headers(sign_data)
 
-        response = self._post_request(url, headers, data)
+        response = self._post_request(url, headers, data, submit=True, allow_302=True)
         if response.get("msg") == "302":
             logger.info("检测到行为验证码，正在通过···")
             data["captcha"] = self.solve_click_word_captcha()
-            self._post_request(url, headers, data)
+            # RISK-C02 修复：二次提交必须校验结果，避免"假成功"
+            retry_response = self._post_request(url, headers, data, submit=True, allow_302=True)
+            if retry_response.get("msg") == "302":
+                # L4: 二次提交仍要求验证码 → 处理超限，熔断
+                raise CaptchaExhaustedError("验证码校验未通过（二次提交仍要求验证码），打卡未提交")
 
     def get_upload_token(self) -> str:
         """获取上传文件的认证令牌"""
@@ -417,6 +546,23 @@ class ApiClient:
         data = {"t": aes_encrypt(str(int(time.time() * 1000)))}
         rsp = self._post_request(url, headers, data)
         return rsp.get("data", "")
+
+    def server_has_checkin(self, checkin_type: str, today_str: str) -> bool:
+        """只读核验：服务端当日是否已存在指定类型的打卡记录（L3）。
+
+        不产生任何写操作；查询失败由调用方处理。
+        """
+        info = self.get_checkin_info()
+        if not info or info.get("type") != checkin_type:
+            return False
+        create = info.get("createTime")
+        if not create:
+            return False
+        try:
+            from datetime import datetime as _dt
+            return _dt.strptime(create, "%Y-%m-%d %H:%M:%S").date().isoformat() == today_str
+        except ValueError:
+            return False
 
     def _get_authenticated_headers(
         self,
@@ -428,6 +574,8 @@ class ApiClient:
             "authorization": self.config.get_value("userInfo.token"),
             "userid": self.config.get_value("userInfo.userId"),
             "rolekey": self.config.get_value("userInfo.roleKey"),
+            # 2026-09: 服务端新增版本校验，认证请求头必须携带 version
+            "version": "5.31.6",
         })
         
         if sign_data:

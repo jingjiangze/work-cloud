@@ -1,29 +1,31 @@
 {
+  "_comment": "模板：复制为 user/<phone 或 userId>.json 后填写真实值；本文件不会被当作账号（前缀 example 已被跳过）",
   "config": {
     "user": {
       "phone": "工学云手机号",
       "password": "工学云密码"
     },
     "clockIn": {
+      "enabled": true,
       "mode": "daily",
       "location": {
-        "address": "四川省 · 成都市 · 高新区 · 在科创十一街附近",
-        "latitude": "30.559922",
-        "longitude": "104.093023",
-        "province": "四川省",
-        "city": "成都市",
-        "area": "高新区"
+        "address": "省 · 市 · 区 · 详细地址",
+        "latitude": "0.000000",
+        "longitude": "0.000000",
+        "province": "省",
+        "city": "市",
+        "area": "区"
       },
       "imageCount": 0,
       "description": [
-        "今天天气不错",
-        "今天天气很好",
-        "今天天气不太好"
+        "今日实习工作正常开展"
       ],
       "specialClockIn": false,
       "customDays": [
         1,
+        2,
         3,
+        4,
         5
       ]
     },
@@ -35,60 +37,20 @@
       "weekly": {
         "enabled": true,
         "imageCount": 0,
-        "submitTime": 4
+        "submitTime": 5
       },
       "monthly": {
-        "enabled": false,
+        "enabled": true,
         "imageCount": 0,
-        "submitTime": 29
+        "submitTime": 28
       }
     },
     "ai": {
-      "model": "gpt-4o-mini",
-      "apikey": "sk-osdhgosdipghpsdgjiosfvinoips",
-      "apiUrl": "https://api.openai.com/"
+      "model": "",
+      "apikey": "",
+      "apiUrl": ""
     },
-    "pushNotifications": [
-      {
-        "type": "NotifyX",
-        "enabled": true,
-        "apiKey": "your_api_key",
-        "description": "简短的消息描述",
-        "team": "your_team（可选）"
-      },
-      {
-        "type": "Server",
-        "enabled": true,
-        "sendKey": "your_key"
-      },
-      {
-        "type": "PushPlus",
-        "enabled": true,
-        "token": "your_token"
-      },
-      {
-        "type": "AnPush",
-        "enabled": true,
-        "token": "your_token",
-        "channel": "通道ID,多个用英文逗号隔开",
-        "to": "根据官方文档获取"
-      },
-      {
-        "type": "WxPusher",
-        "enabled": true,
-        "spt": "your_spt"
-      },
-      {
-        "type": "SMTP",
-        "enabled": true,
-        "host": "smtp服务地址",
-        "port": 465,
-        "username": "发件人邮箱",
-        "password": "smtp密码",
-        "from": "发件人名称",
-        "to": "收件人邮箱"
-      }
-    ],
+    "pushNotifications": [],
     "device": "{brand: TA J20, systemVersion: 17, Platform: Android, isPhysicalDevice: true, incremental: K23V10A}"
   }
 }

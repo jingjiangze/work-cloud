@@ -53,7 +53,11 @@ def generate_article(
         "Authorization": f"Bearer {api_key}",
     }
     # 使用urljoin防止拼接错误
-    api_url = urljoin(api_base_url.rstrip("/") + "/", "v1/chat/completions")
+    # normalize: tolerate apiUrl ending with /v1 (avoid /v1/v1/chat/completions)
+    _base = (api_base_url or "").rstrip("/")
+    if _base.endswith("/v1"):
+        _base = _base[:-3]
+    api_url = _base + "/v1/chat/completions"
 
     # 构造系统提示词
     system_prompt = (

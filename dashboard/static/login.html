@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>work-cloud 登录</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #1a2130; --panel2: #212a3d; --border: #2c3650;
+    --text: #e6eaf2; --muted: #8a94ab; --green: #34d399; --red: #f87171;
+    --accent: #7c8cf8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  .box {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 36px 32px; width: 340px;
+  }
+  h1 { font-size: 18px; font-weight: 600; text-align: center; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 12px; text-align: center; margin-bottom: 24px; }
+  .sub .dot { color: var(--green); }
+  label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  input[type=password] {
+    width: 100%; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font-size: 14px; outline: none;
+  }
+  input[type=password]:focus { border-color: var(--accent); }
+  button {
+    width: 100%; margin-top: 18px; background: var(--accent); color: #fff;
+    border: none; border-radius: 8px; padding: 11px 0;
+    font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  .error {
+    background: rgba(248,113,113,.12); color: var(--red);
+    border: 1px solid rgba(248,113,113,.35); border-radius: 8px;
+    padding: 8px 12px; font-size: 12px; margin-bottom: 14px; text-align: center;
+  }
+  .hint { color: var(--muted); font-size: 11px; margin-top: 16px; text-align: center; line-height: 1.6; }
+</style>
+</head>
+<body>
+<form class="box" method="POST" action="/login">
+  <h1>work-cloud 执行看板</h1>
+  <div class="sub"><span class="dot">&#9679;</span> 工学云自动执行器 · 本地服务</div>
+  <!--ERR-->
+  <label for="password">访问密码</label>
+  <input type="password" id="password" name="password" autofocus autocomplete="current-password" required>
+  <button type="submit">登 录</button>
+  <div class="hint">密码存放在服务器 dashboard/password.txt<br>可直接编辑该文件更换密码</div>
+</form>
+</body>
+</html>
