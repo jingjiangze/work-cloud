@@ -5,10 +5,18 @@ on:
   workflow_dispatch: # 手动触发
   schedule:
     # 使用 UTC 时间，UTC 时间 对应 北京时间 -8 小时
-    - cron: "0 0 * * *" # UTC 00:00 / 北京时间 08:00
-    - cron: "0 1 * * *" # UTC 01:00 / 北京时间 09:00
-    - cron: "0 9 * * *" # UTC 09:00 / 北京时间 17:00
-    - cron: "0 10 * * *" # UTC 10:00 / 北京时间 18:00
+    #
+    # 2026-10-20 调整：由每日 4 次整点改为每日 2 次非整点。
+    # 理由：
+    # 1. main.py 按 `current_hour < 12` 决定打上班/下班卡，一次运行只能打一种卡，
+    #    因此一天必须上午、下午各一次；原 17:00/18:00 两次对同一次下班卡是冗余。
+    # 2. Actions 的 runner 是临时 VM，`data/` 每次新建 ⇒ `TaskStateStore.is_done()`
+    #    的本地幂等门禁永远不命中，多设 cron 只会造成同一张卡的重复提交，
+    #    在服务端看来是多余的风控暴露面。
+    # 3. GitHub 官方明确 schedule 事件在「每小时整点」负载最高、最易延迟，
+    #    严重时 queued job 会被丢弃 ⇒ 移出整点，并拉开间隔避免相互顶掉。
+    - cron: "37 0 * * *" # UTC 00:37 / 北京时间 08:37
+    - cron: "37 9 * * *" # UTC 09:37 / 北京时间 17:37
 
 # 配置并发控制：排队执行（RISK-A02：不取消进行中的运行，
 # 避免打卡执行到一半被强杀产生"已登录未提交"状态）
@@ -62,6 +70,10 @@ jobs:
           pip install -r requirements.txt
 
       # 执行任务
+      # 账号来源优先级：环境变量 USER（secret，JSON 数组）> user/*.json 文件。
+      # 注意：`user/*.json` 被 .gitignore 隔离，Actions 工作区里只有 example.json
+      # 模板（且已被 main.py 的 example 前缀过滤跳过），所以 Actions 上账号
+      # 只能来自 secret。
       - name: Run sign in script
         env:
           USER: ${{ secrets.USER }}
@@ -69,11 +81,15 @@ jobs:
         run: |
           python main.py
 
+      # 清理历史运行记录
+      # 2026-10-20 调整：retain_days 0 / keep_minimum_runs 2 ⇒ 14 / 20。
+      # 原配置只保留最新 2 条且不按结论过滤，失败的 run 同样被删，
+      # 导致「某天没打卡成功」永远查不到现场。
       - name: Clean up workflow runs
         if: always()
         uses: Mattraks/delete-workflow-runs@v2
         with:
           token: ${{ github.token }}
           repository: ${{ github.repository }}
-          retain_days: 0
-          keep_minimum_runs: 2
+          retain_days: 14
+          keep_minimum_runs: 20

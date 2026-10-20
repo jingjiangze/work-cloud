@@ -999,7 +999,14 @@ def _execute_tasks_impl(selected_files: Optional[List[str]] = None):
     json_files = []
     try:
         if os.path.exists(USER_DIR):
-            json_files = [f[:-5] for f in os.listdir(USER_DIR) if f.endswith(".json")]
+            # example.json 是配置模板（`user/example.json` 的 _comment 也这么声明），
+            # 不含真实账号；此前只按 .json 后缀过滤，导致模板被当成一个账号加载。
+            # 在 Actions 上尤其有害：它会制造「有任务在跑」的假象，
+            # 而真实账号其实一个都没执行，且 job 仍判 success（假绿）。
+            json_files = [
+                f[:-5] for f in os.listdir(USER_DIR)
+                if f.endswith(".json") and not f.startswith("example")
+            ]
             logger.info(f"发现 {len(json_files)} 个配置文件")
         else:
             logger.warning(f"用户目录不存在: {USER_DIR}")
@@ -1027,8 +1034,13 @@ def _execute_tasks_impl(selected_files: Optional[List[str]] = None):
             logger.error(f"USER 不是有效的JSON格式: {e}")
 
     if not json_files and not user_configs:
-        logger.warning("未找到任何有效配置")
-        return
+        # 空跑必须让进程非零退出。
+        # 历史问题：`user/*.json` 被 .gitignore 隔离 + `secrets.USER` 未设置时，
+        # 这里只 warning 后 return，进程退出码仍是 0 ⇒ Actions 的 step 判 success，
+        # 于是一个卡都没打，job 却是绿的。这里改成显式失败，
+        # 让「凭据没配」这种配置错误立刻变红，而不是被误认为打卡成功。
+        logger.error("未找到任何有效配置（user/*.json 为空且环境变量 USER 未设置）")
+        raise SystemExit(2)
 
     tasks = []
 
@@ -1047,7 +1059,7 @@ def _execute_tasks_impl(selected_files: Optional[List[str]] = None):
 
     if not tasks:
         logger.error("没有成功创建任何任务")
-        return
+        raise SystemExit(3)
 
     # Stage 2: 每个任务显式构建 AccountContext（自动注册进 registry）；
     # 构建失败不阻断 legacy 路径——context=None 时 run() 行为与旧版一致
@@ -1077,7 +1089,14 @@ def _execute_tasks_impl(selected_files: Optional[List[str]] = None):
 
 
 def execute_tasks(selected_files: Optional[List[str]] = None):
-    """单实例入口：同一台机器同时只允许一个 work-cloud 进程执行（L1）"""
+    """单实例入口：同一台机器同时只允许一个 work-cloud 进程执行（L1）
+
+    退出码约定：
+    - 0：正常跑完（账号可能全部失败，详见下方说明）
+    - 2：没有任何有效账号配置（空跑，属于配置错误）
+    - 3：有配置文件但全部加载失败
+    - 4：另一个进程持有运行锁，本次未执行
+    """
     from util.local_run_lock import LocalRunLock, default_lock_path
     run_lock = LocalRunLock(default_lock_path())
     if not run_lock.acquire():
@@ -1085,7 +1104,7 @@ def execute_tasks(selected_files: Optional[List[str]] = None):
         record_event("process", "全局", EVENT_SECOND_INSTANCE_BLOCKED,
                      stage="startup", action="立即退出",
                      result="另一进程持有运行锁")
-        return
+        raise SystemExit(4)
     try:
         _execute_tasks_impl(selected_files)
     finally:
