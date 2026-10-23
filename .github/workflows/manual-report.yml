@@ -1,0 +1,43 @@
+name: manual-report
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "week or month"
+        required: true
+        default: "week"
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Materialize user config
+        env:
+          USER_JSON: ${{ secrets.USER }}
+        run: |
+          mkdir -p user
+          python - <<'PY'
+          import json, os
+          data = json.loads(os.environ["USER_JSON"])
+          cfg = data[0] if isinstance(data, list) else data
+          with open("user/me.json", "w", encoding="utf-8") as fh:
+              json.dump(cfg, fh, ensure_ascii=False, indent=2)
+          PY
+      - name: Submit report
+        env:
+          TZ: Asia/Shanghai
+        run: |
+          case "${{ inputs.kind }}" in
+            week|month) ;;
+            *) echo "bad kind"; exit 1 ;;
+          esac
+          python submit_now.py "${{ inputs.kind }}"
