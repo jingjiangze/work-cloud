@@ -1,0 +1,64 @@
+name: get-last-location
+on: workflow_dispatch
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.10", cache: "pip" }
+      - run: pip install -r requirements.txt
+      - name: Query last checkin
+        env:
+          USER_JSON: ${{ secrets.USER }}
+          TZ: Asia/Shanghai
+        run: |
+          mkdir -p user
+          python - <<'PY'
+          import json, os
+          data = json.loads(os.environ["USER_JSON"])
+          cfg = data[0] if isinstance(data, list) else data
+          with open("user/me.json", "w", encoding="utf-8") as fh:
+              json.dump(cfg, fh, ensure_ascii=False, indent=2)
+          PY
+          python - <<'PY'
+          import json, sys
+          sys.path.insert(0, ".")
+          from util.Config import ConfigManager
+          from coreApi.MainLogicApi import ApiClient
+
+          cfg = ConfigManager("user/me.json")
+          client = ApiClient(cfg)
+          client.login()
+
+          info = client.get_checkin_info()
+          # Print ALL fields of the last checkin record
+          print("=== LAST CHECKIN RECORD ===")
+          for k in sorted(info.keys()):
+              v = info.get(k)
+              if v is not None:
+                  print(f"  {k}: {v}")
+
+          # Also try getting attendance list
+          import time
+          from util.CryptoUtils import aes_encrypt
+          headers = client._get_authenticated_headers()
+          from datetime import datetime
+          now = datetime.now()
+          data = {
+              "yearmonth": now.strftime("%Y%m"),
+              "t": aes_encrypt(str(int(time.time() * 1000))),
+          }
+          try:
+              rsp = client._post_request("attendence/clock/v2/listSynchro", headers, data)
+              records = rsp.get("data", [])
+              print(f"\n=== THIS MONTH RECORDS ({len(records)} total) ===")
+              for r in records[:5]:
+                  print(f"  date={r.get('createTime')} type={r.get('type')} "
+                        f"lat={r.get('latitude')} lng={r.get('longitude')} "
+                        f"addr={r.get('lastDetailAddress','')[:30]} state={r.get('state')}")
+          except Exception as e:
+              print(f"listSynchro error: {e}")
+          PY
