@@ -1,9 +1,10 @@
 name: "打卡"
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "37 0 * * *"
-    - cron: "37 9 * * *"
+  # 2026-10-25 停用 schedule：GitHub 定时实测延迟 3h57m~4h35m，
+  # cron 08:37(北京) 实际 13:12 才启动；main.py 用 `hour < 12` 判定上下班，
+  # 导致上班卡被误判成下班卡（台账 am 长期缺失）。
+  # 改由 ECS systemd timer 精确 dispatch（即时生效）：08:25 上班 / 17:25 下班
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
