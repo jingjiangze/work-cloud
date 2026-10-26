@@ -62,6 +62,14 @@ class SubmitUnknownError(Exception):
     """
 
 
+class RiskVerificationRequired(Exception):
+    """服务端要求本人实名验证（msg=304）。
+
+    平台返回 code=200 但 msg=304，实际未提交。
+    必须本人完成支付宝安全验证，代码重试无效。
+    """
+
+
 class ApiClient:
     """
     ApiClient类用于与远程服务器进行交互，包括用户登录、获取实习计划、获取打卡信息、提交打卡等功能。
@@ -135,6 +143,16 @@ class ApiClient:
                 # L4 修正：allow_302=True 时把 302（行为验证码）正常返回给
                 # 提交方处理 —— 否则 submit_clock_in 的验证码分支是死代码
                 if code == 200:
+                    if msg == "304":
+                        # 2026-10-26: code=200 + msg=304 = 需要本人支付宝实名验证，
+                        # 实际未提交。以前被当成成功（假绿）。
+                        detail = str(rsp.get("data") or "")[:200]
+                        record_event(
+                            getattr(self, "user_key", "unknown"), "request",
+                            EVENT_CAPTCHA_REQUIRED, stage=f"attempt {attempt + 1}",
+                            action="raise_304", result=detail[:120])
+                        raise RiskVerificationRequired(
+                            f"打卡未提交（msg=304 需要本人实名验证）: {detail}")
                     if msg == "302":
                         # L6: 行为验证码出现属于风险事件，记录台账
                         record_event(
