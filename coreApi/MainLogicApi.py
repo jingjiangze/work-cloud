@@ -483,6 +483,26 @@ class ApiClient:
         rsp = self._post_request(url, headers, data)
         return rsp.get("data", [{}])[0] if rsp.get("data") else {}
 
+    def create_alipay_register(self) -> Dict[str, str]:
+        """申请支付宝安全验证登记（解除 304）。
+
+        返回 {"outRegisterNo": str, "registerUrl": "alipays://..."}；
+        登记号 30 分钟内有效，本人用支付宝打开 registerUrl 完成授权后，
+        下一次 submit_clock_in 携带 outRegisterNo 即可解除 304。
+        """
+        url = "usercenter/alipay/v1/createAxdjk"
+        headers = self._get_authenticated_headers()
+        data = {"t": aes_encrypt(str(int(time.time() * 1000)))}
+        rsp = self._post_request(url, headers, data)
+        d = rsp.get("data") if isinstance(rsp, dict) else None
+        if not isinstance(d, dict):
+            raise ValueError("支付宝安全验证登记失败: %s" % str(rsp)[:200])
+        no = str(d.get("outRegisterNo") or "").strip()
+        link = str(d.get("registerUrl") or "").strip()
+        if not no or not link.startswith("alipays://"):
+            raise ValueError("支付宝安全验证响应不完整: %s" % str(d)[:200])
+        return {"outRegisterNo": no, "registerUrl": link}
+
     def submit_clock_in(self, checkin_info: Dict[str, Any]) -> None:
         """提交打卡信息"""
         url = "attendence/clock/teacher/v2/save"
@@ -518,7 +538,8 @@ class ApiClient:
             "attendanceType", "username", "attachments", "userId", "isSYN", 
             "studentId", "applyState", "studentNumber", "memberNumber", "headImg", 
             "attendenceTime", "depName", "majorName", "className", "logDtoList", 
-            "isBeyondFence", "practiceAddress", "tpJobId", "t", "version"
+            "isBeyondFence", "practiceAddress", "tpJobId",
+            "outRegisterNo", "t", "version"
         ]
         data = dict.fromkeys(keys, None)
 
@@ -531,6 +552,10 @@ class ApiClient:
             "type": checkin_info.get("type"),
             "planId": planId,
             "attachments": checkin_info.get("attachments", None),
+            # 304 解除：本次打卡携带支付宝安全验证登记号（TTL 30min）
+            "outRegisterNo": (checkin_info.get("outRegisterNo")
+                              or self.config.get_value("config.clockIn.outRegisterNo")
+                              or self.config.get_value("userInfo.outRegisterNo")),
             "userId": self.config.get_value("userInfo.userId"),
             "lastDetailAddress": checkin_info.get("lastDetailAddress"),
             "attendenceTime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
