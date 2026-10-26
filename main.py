@@ -22,6 +22,7 @@ from util.report_validator import (
     record_report,
     DEFAULT_MIN_LENGTH,
 )
+from core.clockin_recovery import submit_with_recovery
 from coreApi.auth_checker import ensure_login
 from models.execution_history import append_entry
 from util.preflight import run_preflight
@@ -281,8 +282,14 @@ def perform_clock_in(
         }
 
         # L3: 提交 → (明确成功/UNKNOWN) → 只读核验 → 最多一次补偿
+        def _submit_once():
+            """提交打卡；命中 304 时自动登记→推送→轮询重试。"""
+            _, recovered = submit_with_recovery(api_client, checkin_info, config)
+            if recovered:
+                logger.info(f"304 风控闭环完成（第 {recovered} 次轮询提交成功）")
+
         status, submit_message = _resolve_submit(
-            lambda: api_client.submit_clock_in(checkin_info),
+            _submit_once,
             lambda: api_client.server_has_checkin(
                 checkin_type, current_time.date().isoformat()),
             f"{display_type}打卡",
