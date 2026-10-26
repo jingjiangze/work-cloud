@@ -1,0 +1,32 @@
+name: "备份镜像"
+on:
+  workflow_dispatch:
+  schedule:
+    # 每天 UTC 03:17（北京 11:17）。注意：本仓库已确认 GitHub schedule 会延迟 4h 左右，
+    # 但备份对时效不敏感，延迟无影响。
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    # 只在源仓运行，避免备份仓里同名 workflow 自我推送
+    if: github.repository == 'jingjiangze/work-cloud'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mirror source repo into private backup
+        env:
+          BACKUP_TOKEN: ${{ secrets.BACKUP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BACKUP_TOKEN:-}" ]; then
+            echo "BACKUP_TOKEN 未配置，跳过"; exit 1
+          fi
+          rm -rf /tmp/src.git
+          git clone --bare "https://github.com/${GITHUB_REPOSITORY}.git" /tmp/src.git
+          cd /tmp/src.git
+          git push --mirror \
+            "https://x-access-token:${BACKUP_TOKEN}@github.com/jingjiangze/work-cloud-backup.git"
+          echo "mirror done: $(git rev-parse --short HEAD)"
