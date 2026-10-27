@@ -193,7 +193,14 @@ def perform_clock_in(
         current_hour = current_time.hour
 
         # 确定打卡类型
-        if current_hour < 12:
+        # 2026-10-27：允许外部显式指定（ECS 定时器按 08:25/17:25 派发时传 START/END）。
+        # 历史上 GitHub cron 延迟 4 小时，导致上班卡被 `hour<12` 误判成下班卡。
+        _forced = (os.getenv("CHECKIN_TYPE") or "").strip().upper()
+        if _forced in ("START", "END"):
+            checkin_type = _forced
+            display_type = "上班" if _forced == "START" else "下班"
+            logger.info(f"打卡类型由 CHECKIN_TYPE 指定: {_forced}")
+        elif current_hour < 12:
             checkin_type = "START"
             display_type = "上班"
         else:
