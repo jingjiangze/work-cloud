@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 class TerminalPunchError(Exception):
     """自动化无法继续的终态错误（如人脸核验），不再重试。"""
 
-POLL_ATTEMPTS = 56   # 28 分钟，覆盖登记号 30 分钟有效期（授权晚一点也能落）
+POLL_ATTEMPTS = 60   # 30 分钟（60×30s）：本人扫码有延迟，必须给满整个有效期
 POLL_INTERVAL = 30
 REGISTER_TTL_SEC = 30 * 60      # 登记号有效期 30 分钟
-MAX_ROUNDS = 1                  # 单轮不补卡：登记号还有效时补卡只会弹第二条链接（用户明确要求「失效后再弹」）
+MAX_ROUNDS = 2                  # 两轮：第 1 轮跑满 30 分钟；登记号过期后才开第 2 轮（补卡），绝不提前发第二条链接
 
 
 def build_click_link(register_url: str) -> str:
