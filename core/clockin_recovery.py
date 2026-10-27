@@ -94,11 +94,22 @@ def submit_with_recovery(
     Raises:
         RiskVerificationRequired: 所有轮次（含补卡）都未解除。
     """
+    first_hit = None
     try:
         return api_client.submit_clock_in(checkin_info), None
-    except RiskVerificationRequired as first_hit:
+    except RiskVerificationRequired as exc:
+        first_hit = exc
+    except Exception as exc:  # noqa: BLE001
+        # 2026-10-27 实测：本人授权后平台不再回 304，而是回
+        # 「验证已过期，请重新签到再进行验证」。这条同样属于「需要重新走一次
+        # 支付宝验证」，必须进恢复闭环，否则打卡直接硬失败。
+        msg = str(exc)
+        if ("验证已过期" not in msg) and ("304" not in msg) and ("风险操作" not in msg):
+            raise
+        first_hit = exc
+    if first_hit is not None:
         kind = str(checkin_info.get("type") or "")
-        logger.warning(f"{kind}打卡触发 304（需支付宝验证），开始自动闭环")
+        logger.warning(f"{kind}打卡需要支付宝验证（{str(first_hit)[:60]}），开始自动闭环")
 
         last_err = first_hit
         for round_no in range(1, max_rounds + 1):
