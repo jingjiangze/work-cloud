@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 class TerminalPunchError(Exception):
     """自动化无法继续的终态错误（如人脸核验），不再重试。"""
 
-POLL_ATTEMPTS = 10   # 10×180s = 30 分钟：实测每次提交都触发一次人脸比对，
-                     # 连续 4 次失败平台就把验证作废 ⇒ 必须放慢，别自己打死验证
+POLL_ATTEMPTS = 0    # **不轮询**：实测每次提交都触发一次服务端人脸比对，
+                     # 连续 4 次失败平台就把验证作废 ⇒ 只提交一次，等本人扫完由 retry 任务补提交
 POLL_INTERVAL = 180
 REGISTER_TTL_SEC = 30 * 60      # 登记号有效期 30 分钟
 MAX_ROUNDS = 2
@@ -204,6 +204,8 @@ def submit_with_recovery(
         logger.warning(f"{kind}打卡需要验证：{msg[:70]}")
         if retry_only:
             logger.info("CHECKIN_RETRY_ONLY=1：本次只做单次提交，不申请登记号、不推送链接")
+            if "人脸核验" in msg:
+                _push_face_notice(config)   # 记下当日需人脸核验，后续运行短路
             raise
 
     if str(config.get_value("config.clockIn.faceNoticeDate") or "") == time.strftime("%Y-%m-%d"):
@@ -235,7 +237,8 @@ def submit_with_recovery(
     if rsp is not None:
         return rsp, attempt
     if not face_seen:
-        raise RiskVerificationRequired("等待本人完成支付宝/人脸验证超时，未提交")
+        raise RiskVerificationRequired(
+            "已推送授权链接，等待本人扫码后由 retry 任务补提交（本次不轮询，避免打死验证）")
     _push_face_notice(config)
     if expired:
         logger.warning("验证已被平台作废 ⇒ 本次不尝试补卡（省额度），等下次重新申请登记号")
