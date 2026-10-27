@@ -145,7 +145,9 @@ def _try_makeup(api_client, checkin_info, config):
         config.update_config(ym, "config", "clockIn", "makeupMonth")
         logger.info(f"补卡成功（本月已用 {used + 1}/{MAKEUP_MAX_PER_MONTH}）")
         return resp
-    raise RiskVerificationRequired("补卡被平台拒绝: %s" % str(resp.get("msg"))[:100])
+    raise RiskVerificationRequired(
+        "补卡被平台拒绝: %s（若提示人脸核验/验证过期，说明尚未在新链接上完成扫脸）"
+        % str(resp.get("msg"))[:100])
 
 
 def _push_face_notice(config):
@@ -209,9 +211,27 @@ def submit_with_recovery(
             raise
 
     if str(config.get_value("config.clockIn.faceNoticeDate") or "") == time.strftime("%Y-%m-%d"):
-        logger.info("今日已确认需人脸核验 ⇒ 跳过登记号/链接/轮询，直接按配额补卡")
-        resp = _try_makeup(api_client, dict(checkin_info, outRegisterNo=reuse_no), config)
-        return resp, 0
+        # 当日已确认需人脸核验。补卡必须有「可扫的新链接」才有意义：
+        # 若当前没有有效登记号（或已过期），先申请并推送一条，再走补卡。
+        if not reuse_no:
+            logger.info("当日无有效登记号 ⇒ 先申请新登记号并推送（补卡前必须可扫）")
+            try:
+                reg = api_client.create_alipay_register()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"申请登记号失败: {exc}")
+                raise
+            reuse_no, reuse_ts = reg["outRegisterNo"], time.time()
+            _mark_register(config, reuse_no, reuse_ts)
+            _push_link(config, build_click_link(reg["registerUrl"]), reuse_no, kind, 1)
+        logger.info("今日已确认需人脸核验 ⇒ 跳过轮询，直接按配额补卡")
+        try:
+            resp = _try_makeup(api_client, dict(checkin_info, outRegisterNo=reuse_no), config)
+            return resp, 0
+        except RiskVerificationRequired as exc:
+            if "人脸核验" in str(exc):
+                raise RiskVerificationRequired(
+                    "补卡需要先在新链接上完成人脸核验（本次未扫）: %s" % str(exc)[:80])
+            raise
 
     # ---- 2) 需要验证：只有在"没有可复用的登记号"或"现有登记号已作废"时才新建
     register_no, issued_at = reuse_no, reuse_ts
@@ -238,7 +258,8 @@ def submit_with_recovery(
         return rsp, attempt
     if not face_seen:
         raise RiskVerificationRequired(
-            "已推送授权链接，等待本人扫码后由 retry 任务补提交（本次不轮询，避免打死验证）")
+            "已推送授权链接；本轮按设计不轮询（避免打死验证），"
+            "等本人扫码后由 08:35/08:43 的 retry 任务补提交")
     _push_face_notice(config)
     if expired:
         logger.warning("验证已被平台作废 ⇒ 本次不尝试补卡（省额度），等下次重新申请登记号")
