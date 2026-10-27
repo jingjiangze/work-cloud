@@ -483,6 +483,30 @@ class ApiClient:
         rsp = self._post_request(url, headers, data)
         return rsp.get("data", [{}])[0] if rsp.get("data") else {}
 
+    def _fresh_out_register(self, checkin_info):
+        """只有在登记号仍有效时才携带 outRegisterNo。
+
+        实测 2026-10-27：带着**过期**登记号提交，平台返回
+        「验证已过期，请重新签到再进行验证」——这不是 304，不会进入恢复流程，
+        打卡直接硬失败（且因为收尾不抛错，流水线还是绿的）。
+        所以：显式传入的（本轮刚申请的）直接用；来自配置的必须验有效期。
+        """
+        explicit = str((checkin_info or {}).get("outRegisterNo") or "").strip()
+        if explicit:
+            return explicit
+        no = str(self.config.get_value("config.clockIn.outRegisterNo") or "").strip()
+        if not no:
+            return None
+        try:
+            ts = int(self.config.get_value("config.clockIn.outRegisterNoIssuedAt") or 0)
+        except Exception:
+            ts = 0
+        if not ts:
+            return None          # 没有签发时间无法判断有效期 ⇒ 不冒险携带
+        if (time.time() - ts) >= 1800:
+            return None          # 已过 30 分钟
+        return no
+
     def create_alipay_register(self) -> Dict[str, str]:
         """申请支付宝安全验证登记（解除 304）。
 
@@ -553,9 +577,7 @@ class ApiClient:
             "planId": planId,
             "attachments": checkin_info.get("attachments", None),
             # 304 解除：本次打卡携带支付宝安全验证登记号（TTL 30min）
-            "outRegisterNo": (checkin_info.get("outRegisterNo")
-                              or self.config.get_value("config.clockIn.outRegisterNo")
-                              or self.config.get_value("userInfo.outRegisterNo")),
+            "outRegisterNo": self._fresh_out_register(checkin_info),
             "userId": self.config.get_value("userInfo.userId"),
             "lastDetailAddress": checkin_info.get("lastDetailAddress"),
             "attendenceTime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
