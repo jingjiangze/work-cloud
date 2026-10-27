@@ -892,6 +892,7 @@ def run(config: ConfigManager,
                 logger.warning(f"UNKNOWN 跨轮收敛失败（忽略）: {e}")
 
         results = []
+        _all_results = results
         if task_decisions is not None:
             # Stage 5: 决策层禁用的任务——记 SKIPPED（带原因），不发任何请求
             for key in TASK_LABELS:
@@ -1011,6 +1012,7 @@ def run(config: ConfigManager,
 
 def _execute_tasks_impl(selected_files: Optional[List[str]] = None):
     """创建并执行任务（调用方需已持有单实例锁）"""
+    _all_results: List[Dict[str, Any]] = []   # 供外层判定退出码
     _log_ctx.tag = "MAIN"
     logger.info("开始执行工学云任务")
 
@@ -1104,6 +1106,7 @@ def _execute_tasks_impl(selected_files: Optional[List[str]] = None):
                 logger.exception(f"任务处理过程中发生错误: {e}")
 
     logger.info("工学云任务执行结束")
+    return _all_results
 
 
 def execute_tasks(selected_files: Optional[List[str]] = None):
