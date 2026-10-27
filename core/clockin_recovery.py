@@ -78,6 +78,23 @@ def _poll(api_client, checkin_info, register_no, attempts, interval):
     return None, 0
 
 
+def _fresh_register(config):
+    """取出 30 分钟内仍有效的登记号（跨运行复用）。
+
+    实测（2026-10-27）：每次 304 都新申请登记号，用户手动授权的是**上一个**，
+    于是「授权了却仍 304」。同一登记号 30 分钟内有效，所以复用它，
+    让「用户点链接 → 下一次运行接着轮询」这条跨运行闭环成立。
+    """
+    try:
+        no = str(config.get_value("config.clockIn.outRegisterNo") or "").strip()
+        ts = int(config.get_value("config.clockIn.outRegisterNoIssuedAt") or 0)
+    except Exception:
+        return None, 0
+    if no and ts and (time.time() - ts) < REGISTER_TTL_SEC:
+        return no, ts
+    return None, 0
+
+
 def submit_with_recovery(
     api_client,
     checkin_info: dict,
@@ -101,23 +118,27 @@ def submit_with_recovery(
         logger.warning(f"{kind}打卡触发 304（需支付宝验证），开始自动闭环")
 
         last_err = first_hit
+        reuse_no, reuse_ts = _fresh_register(config)
         for round_no in range(1, max_rounds + 1):
-            issued_at = time.time()
-            try:
-                reg = api_client.create_alipay_register()
-            except Exception as exc:  # noqa: BLE001
-                logger.error(f"第 {round_no} 轮申请登记号失败: {exc}")
-                break
-
-            register_no = reg["outRegisterNo"]
-            link = build_click_link(reg["registerUrl"])
-            config.update_config(register_no, "config", "clockIn", "outRegisterNo")
-            config.update_config(int(issued_at), "config", "clockIn",
-                                 "outRegisterNoIssuedAt")
-            logger.info(f"第 {round_no} 轮已申请登记号 {register_no}")
-
-            pushed = _push_link(config, link, register_no, kind, round_no)
-            logger.info("授权链接已推送" if pushed else "授权链接推送失败，仅记录日志")
+            if round_no == 1 and reuse_no:
+                register_no, issued_at = reuse_no, reuse_ts
+                logger.info(f"复用仍有效的登记号 {register_no}（有效期剩余 "
+                            f"{int((REGISTER_TTL_SEC - (time.time() - issued_at)) / 60)} 分钟），不再重新申请")
+            else:
+                issued_at = time.time()
+                try:
+                    reg = api_client.create_alipay_register()
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(f"第 {round_no} 轮申请登记号失败: {exc}")
+                    break
+                register_no = reg["outRegisterNo"]
+                link = build_click_link(reg["registerUrl"])
+                config.update_config(register_no, "config", "clockIn", "outRegisterNo")
+                config.update_config(int(issued_at), "config", "clockIn",
+                                     "outRegisterNoIssuedAt")
+                logger.info(f"第 {round_no} 轮已申请登记号 {register_no}")
+                pushed = _push_link(config, link, register_no, kind, round_no)
+                logger.info("授权链接已推送" if pushed else "授权链接推送失败，仅记录日志")
 
             rsp, attempt = _poll(api_client, checkin_info, register_no,
                                  poll_attempts, poll_interval)
