@@ -12,6 +12,14 @@ on:
           - auto
           - START
           - END
+      mode:
+        description: "auto=需要验证时申请登记号并推送链接；retry=只做一次提交（本人已扫脸后用，不推送链接）"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - retry
   # schedule 已于 2026-10-25 停用：GitHub 定时实测延迟 3h57m~4h35m，
   # cron 08:37(北京) 实际 13:12 才启动 ⇒ 上班卡被误判成下班卡。
   # 现由 ECS systemd timer 精确 dispatch（08:25 START / 17:25 END）。
@@ -109,6 +117,7 @@ jobs:
         env:
           TZ: Asia/Shanghai
           CHECKIN_TYPE: ${{ github.event.inputs.type }}
+          CHECKIN_RETRY_ONLY: ${{ github.event.inputs.mode == 'retry' && '1' || '' }}
           # Linux 上 USER 默认是 runner，main.py 会拿它当 JSON 解析并刷一条错误日志；
           # 显式置空让它走 user/*.json 那条路（也是唯一会回写登记号的路径）。
           USER: ""

@@ -96,6 +96,28 @@ def _poll(api_client, checkin_info, register_no, attempts, interval):
     return None, 0
 
 
+def _fresh_register(config):
+    """取出仍在 30 分钟有效期内的登记号（跨运行复用）。
+
+    ⭐这是**避免链接打架**的关键：每次 createAxdjk 都会让旧链接失效。
+    实测 2026-10-27：78 分钟里创建了 6 个登记号，用户扫的链接被后续覆盖，
+    扫完立刻变「验证已过期」——今天所有失败都是这么来的。
+    """
+    try:
+        no = str(config.get_value("config.clockIn.outRegisterNo") or "").strip()
+        ts = int(config.get_value("config.clockIn.outRegisterNoIssuedAt") or 0)
+    except Exception:
+        return None, 0
+    if no and ts and (time.time() - ts) < REGISTER_TTL_SEC:
+        return no, ts
+    return None, 0
+
+
+def _mark_register(config, register_no, issued_at):
+    config.update_config(register_no, "config", "clockIn", "outRegisterNo")
+    config.update_config(int(issued_at), "config", "clockIn", "outRegisterNoIssuedAt")
+
+
 def submit_with_recovery(
     api_client,
     checkin_info: dict,
@@ -104,64 +126,60 @@ def submit_with_recovery(
     poll_interval: int = POLL_INTERVAL,
     max_rounds: int = MAX_ROUNDS,
 ):
-    """提交打卡；命中 304 时走「登记 → 推送 → 轮询」闭环，超时自动补卡。
+    """提交打卡；需要支付宝/人脸验证时走「一个登记号 → 一条链接 → 等本人扫」的闭环。
 
-    Returns:
-        (response, recovered_after): 成功时返回服务端响应；
-        recovered_after 为 None 表示一次通过，为整数表示第几次轮询才通过。
-    Raises:
-        RiskVerificationRequired: 所有轮次（含补卡）都未解除。
+    关键约定（2026-10-27 实测定稿）：
+      * **同一时刻只允许存在一个有效登记号**：优先复用 config 里未过期的那个，
+        绝不为了"重试"再申请新的——新登记号会让用户手上那条链接失效。
+      * `CHECKIN_RETRY_ONLY=1`：只做一次提交（用于"本人已扫脸"后的补提交），
+        **不申请登记号、不推送链接**。
+      * 轮询里「人脸核验失败」= 还没扫，继续等；「验证已过期」= 登记号作废，本轮停。
     """
-    first_hit = None
+    retry_only = bool(os.environ.get("CHECKIN_RETRY_ONLY"))
+    kind = str(checkin_info.get("type") or "")
+
+    # ---- 1) 先试一次：复用现有有效登记号（没有就不带）
+    reuse_no, reuse_ts = _fresh_register(config)
+    probe = dict(checkin_info)
+    if reuse_no:
+        probe["outRegisterNo"] = reuse_no
+        logger.info(f"复用现有登记号 {reuse_no}（剩余 "
+                    f"{int((REGISTER_TTL_SEC - (time.time() - reuse_ts)) / 60)} 分钟），不新申请")
     try:
-        return api_client.submit_clock_in(checkin_info), None
-    except RiskVerificationRequired as exc:
-        first_hit = exc
+        return api_client.submit_clock_in(probe), None
     except Exception as exc:  # noqa: BLE001
-        # 2026-10-27 实测：本人授权后平台不再回 304，而是回
-        # 「验证已过期，请重新签到再进行验证」。这条同样属于「需要重新走一次
-        # 支付宝验证」，必须进恢复闭环，否则打卡直接硬失败。
         msg = str(exc)
-        if ("验证已过期" not in msg) and ("304" not in msg) and ("风险操作" not in msg):
+        if not (("验证已过期" in msg) or ("304" in msg) or ("风险操作" in msg)
+                or ("人脸核验" in msg)):
             raise
-        first_hit = exc
-    if first_hit is not None:
-        kind = str(checkin_info.get("type") or "")
-        logger.warning(f"{kind}打卡需要支付宝验证（{str(first_hit)[:60]}），开始自动闭环")
+        logger.warning(f"{kind}打卡需要验证：{msg[:70]}")
+        if retry_only:
+            logger.info("CHECKIN_RETRY_ONLY=1：本次只做单次提交，不申请登记号、不推送链接")
+            raise
 
-        last_err = first_hit
-        for round_no in range(1, max_rounds + 1):
-            issued_at = time.time()
-            try:
-                reg = api_client.create_alipay_register()
-            except Exception as exc:  # noqa: BLE001
-                logger.error(f"第 {round_no} 轮申请登记号失败: {exc}")
-                break
-            register_no = reg["outRegisterNo"]
-            link = build_click_link(reg["registerUrl"])
-            config.update_config(register_no, "config", "clockIn", "outRegisterNo")
-            config.update_config(int(issued_at), "config", "clockIn",
-                                 "outRegisterNoIssuedAt")
-            logger.info(f"第 {round_no} 轮已申请登记号 {register_no}")
-            pushed = _push_link(config, link, register_no, kind, round_no)
-            logger.info("授权链接已推送" if pushed else "授权链接推送失败，仅记录日志")
+    # ---- 2) 需要验证：只有在"没有可复用的登记号"或"现有登记号已作废"时才新建
+    register_no, issued_at = reuse_no, reuse_ts
+    err_msg = str(locals().get("msg", ""))
+    # 复用的登记号被判过期 ⇒ 必须新建；否则沿用它继续等本人扫脸（避免链接打架）
+    need_new = (not reuse_no) or ("验证已过期" in err_msg)
+    if need_new:
+        try:
+            reg = api_client.create_alipay_register()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"申请登记号失败: {exc}")
+            raise
+        register_no, issued_at = reg["outRegisterNo"], time.time()
+        _mark_register(config, register_no, issued_at)
+        link = build_click_link(reg["registerUrl"])
+        logger.info(f"已申请登记号 {register_no}")
+        pushed = _push_link(config, link, register_no, kind, 1)
+        logger.info("授权链接已推送" if pushed else "授权链接推送失败，仅记录日志")
 
-            try:
-                rsp, attempt = _poll(api_client, checkin_info, register_no,
-                                     poll_attempts, poll_interval)
-            except TerminalPunchError:
-                raise
-            if rsp is not None:
-                return rsp, attempt
+    # ---- 3) 等本人完成验证（人脸核验失败=还没扫）
+    rsp, attempt = _poll(api_client, checkin_info, register_no,
+                         poll_attempts, poll_interval)
+    if rsp is not None:
+        return rsp, attempt
+    raise RiskVerificationRequired("等待本人完成支付宝/人脸验证超时，未提交")
 
-            elapsed = time.time() - issued_at
-            expired = elapsed >= REGISTER_TTL_SEC
-            logger.warning(
-                f"第 {round_no} 轮轮询耗尽（已等 {elapsed / 60:.0f} 分钟，"
-                f"登记号{'已过期' if expired else '仍在有效期'}）")
-            if round_no < max_rounds:
-                logger.info("自动补卡：重新申请登记号并再次推送授权链接")
-                continue
 
-        logger.error("所有轮次（含补卡）仍未解除 304，打卡未提交（需本人完成支付宝授权）")
-        raise last_err
