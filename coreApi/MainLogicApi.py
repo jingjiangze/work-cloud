@@ -613,6 +613,82 @@ class ApiClient:
                 # L4: 二次提交仍要求验证码 → 处理超限，熔断
                 raise CaptchaExhaustedError("验证码校验未通过（二次提交仍要求验证码），打卡未提交")
 
+    def submit_clock_in_replace(self, checkin_info: Dict[str, Any]) -> Dict[str, Any]:
+        """提交补卡（attendence/attendanceReplace/v6/save）。
+
+        2026-10-27 从 preauth_api.py 的契约移植（该实现未接入本地客户端）：
+          * attendanceType = "REPLACE"、attendenceTime = None、isReplace = None
+          * headers 追加 Dart UA + application/json（学生端 replace 必需）
+        返回平台原始响应（code=200 视为成功）。
+        """
+        url = "attendence/clock/teacher/v2/save"
+        sign_data = None
+        planId = self.config.get_value("planInfo.planId")
+
+        device_info = self.config.get_value("config.device")
+        if device_info is not None and not isinstance(device_info, str):
+            device_info = json.dumps(device_info, ensure_ascii=False,
+                                     separators=(",", ":"))
+
+        if self.config.get_value("userInfo.userType") != "teacher":
+            url = "attendence/attendanceReplace/v6/save"
+            sign_data = [
+                device_info,
+                checkin_info.get("type"),
+                planId,
+                self.config.get_value("userInfo.userId"),
+                self.config.get_value("config.clockIn.location.address"),
+            ]
+
+        logger.info(f'补卡类型：{checkin_info.get("type")}')
+
+        keys = [
+            "distance", "content", "lastAddress", "lastDetailAddress", "attendanceId",
+            "country", "createBy", "createTime", "description", "device", "images",
+            "isDeleted", "isReplace", "modifiedBy", "modifiedTime", "schoolId",
+            "state", "teacherId", "teacherNumber", "type", "captcha", "appUuid",
+            "isFirstSignInWeb", "stuId", "planId", "attendanceType", "username",
+            "attachments", "userId", "isSYN", "studentId", "applyState",
+            "studentNumber", "memberNumber", "headImg", "attendenceTime",
+            "depName", "majorName", "className", "logDtoList", "isBeyondFence",
+            "practiceAddress", "tpJobId", "jobAddress", "jobAddrPoint",
+            "certifyId", "outRegisterNo", "t", "version"
+        ]
+        data = dict.fromkeys(keys, None)
+        data.update({
+            "country": "中国",
+            "createTime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "description": checkin_info.get("description", None),
+            "device": device_info,
+            "isReplace": None,
+            "state": "NORMAL",
+            "type": checkin_info.get("type"),
+            "planId": planId,
+            "attendanceType": "REPLACE",
+            "attachments": checkin_info.get("attachments", None),
+            "userId": self.config.get_value("userInfo.userId"),
+            "outRegisterNo": self._fresh_out_register(checkin_info),
+            "t": aes_encrypt(str(int(time.time() * 1000))),
+            "version": "5.31.6",
+        })
+
+        loc = self.config.get_value("config.clockIn.location")
+        if isinstance(loc, dict):
+            data.update(loc)
+
+        _apply_location_jitter(data)
+
+        headers = self._get_authenticated_headers(sign_data)
+        headers["user-agent"] = "Dart/3.7 (dart:io)"
+        headers["content-type"] = "application/json"
+
+        response = self._post_request(url, headers, data, submit=True, allow_302=True)
+        if response.get("msg") == "302":
+            logger.info("补卡触发行为验证码，正在通过···")
+            data["captcha"] = self.solve_click_word_captcha()
+            self._post_request(url, headers, data, submit=True, allow_302=True)
+        return response
+
     def get_upload_token(self) -> str:
         """获取上传文件的认证令牌"""
         url = "session/upload/v1/token"
