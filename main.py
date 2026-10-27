@@ -976,11 +976,15 @@ def run(config: ConfigManager,
             })
         except Exception as e:  # 台账失败绝不影响收尾
             logger.warning(f"执行台账记录失败（忽略）: {e}")
-        if pusher:
+        # 推送收敛：本次已推过支付宝授权链接（304 闭环）时不再重复推结果，
+        # 保证「一次打卡只收一条消息」。
+        if pusher and not getattr(config, "_action_pushed", False):
             try:
                 pusher.push(results)
             except Exception as e:
                 logger.error(f"消息推送失败: {e}")
+        elif pusher:
+            logger.info("本次已推送过支付宝授权链接，跳过重复的结果推送")
 
         logger.info(
             f"执行结束：{desensitize_name(config.get_value('userInfo.nikeName'))}"
