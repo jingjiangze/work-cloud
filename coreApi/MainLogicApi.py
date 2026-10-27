@@ -135,7 +135,16 @@ class ApiClient:
                 )
                 response.raise_for_status()
                 rsp = response.json()
-                
+
+                # 2026-10-27 诊断：抓「验证已过期 / 人脸核验失败 / 304」的完整原始报文。
+                # 之前只截 msg 前 200 字，code 与 data 结构从来没记录过，无法定位平台状态。
+                if submit:
+                    try:
+                        _raw = json.dumps(rsp, ensure_ascii=False)[:1500]
+                    except Exception:
+                        _raw = str(rsp)[:1500]
+                    logger.warning(f"[RAW-RESP] url={url} body={_raw}")
+
                 code = rsp.get("code")
                 msg = rsp.get("msg", "未知错误")
 
