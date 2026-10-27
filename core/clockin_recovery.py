@@ -30,8 +30,9 @@ logger = logging.getLogger(__name__)
 class TerminalPunchError(Exception):
     """自动化无法继续的终态错误（如人脸核验），不再重试。"""
 
-POLL_ATTEMPTS = 30   # 30 分钟（30×60s）：拉长间隔降低提交频次（今天实测一跑 56 次提交会加重风控）
-POLL_INTERVAL = 60
+POLL_ATTEMPTS = 10   # 10×180s = 30 分钟：实测每次提交都触发一次人脸比对，
+                     # 连续 4 次失败平台就把验证作废 ⇒ 必须放慢，别自己打死验证
+POLL_INTERVAL = 180
 REGISTER_TTL_SEC = 30 * 60      # 登记号有效期 30 分钟
 MAX_ROUNDS = 2
 MAKEUP_MAX_PER_MONTH = 2   # 补卡每月上限（平台侧限制，保守取 2）                  # 两轮：第 1 轮跑满 30 分钟；登记号过期后才开第 2 轮（补卡），绝不提前发第二条链接
@@ -69,15 +70,16 @@ def _push_link(config, link: str, register_no: str, kind: str, round_no: int) ->
 
 
 def _poll(api_client, checkin_info, register_no, attempts, interval):
-    """带登记号轮询提交；返回 (rsp, attempt, face_seen)。"""
+    """带登记号轮询提交；返回 (rsp, attempt, face_seen, expired)。"""
     face_seen = False
+    expired = False
     for attempt in range(1, attempts + 1):
         time.sleep(interval)
         try:
             rsp = api_client.submit_clock_in(
                 dict(checkin_info, outRegisterNo=register_no))
             logger.info(f"304 已解除（第 {attempt} 次轮询成功）")
-            return rsp, attempt, face_seen
+            return rsp, attempt, face_seen, False
         except RiskVerificationRequired:
             logger.warning(f"第 {attempt}/{attempts} 次轮询仍为 304，继续等待授权")
         except Exception as exc:  # noqa: BLE001
@@ -93,11 +95,12 @@ def _poll(api_client, checkin_info, register_no, attempts, interval):
             elif "验证已过期" in msg:
                 # 2026-10-27 实测：本人扫码后返回的就是这个 —— 说明扫码**消费/作废**了登记号，
                 # 而不是授权它。继续拿它提交只会再撞 46 次同样的错，还白白加重风控。
-                logger.warning("登记号已失效（本人扫码后即作废），本轮停止轮询")
+                logger.warning("验证已失效（多次提交触发人脸比对失败后平台作废），停止轮询")
+                expired = True
                 break
             else:
                 logger.warning(f"第 {attempt} 次轮询异常: {exc}")
-    return None, attempts, face_seen
+    return None, attempts, face_seen, expired
 
 
 def _fresh_register(config):
@@ -135,11 +138,12 @@ def _try_makeup(api_client, checkin_info, config):
 
     logger.info(f"尝试补卡（本月第 {used + 1}/{MAKEUP_MAX_PER_MONTH} 次，REPLACE 端点）")
     resp = api_client.submit_clock_in_replace(checkin_info)
-    config.update_config(used + 1, "config", "clockIn", "makeupCount")
-    config.update_config(ym, "config", "clockIn", "makeupMonth")
     logger.info(f"补卡结果: code={resp.get('code')} msg={resp.get('msg')}")
     if str(resp.get("code")) == "200":
-        logger.info("补卡成功")
+        # 只有成功才消耗月度额度
+        config.update_config(used + 1, "config", "clockIn", "makeupCount")
+        config.update_config(ym, "config", "clockIn", "makeupMonth")
+        logger.info(f"补卡成功（本月已用 {used + 1}/{MAKEUP_MAX_PER_MONTH}）")
         return resp
     raise RiskVerificationRequired("补卡被平台拒绝: %s" % str(resp.get("msg"))[:100])
 
@@ -226,12 +230,15 @@ def submit_with_recovery(
         logger.info("授权链接已推送" if pushed else "授权链接推送失败，仅记录日志")
 
     # ---- 3) 等本人完成验证（人脸核验失败=还没扫）
-    rsp, attempt, face_seen = _poll(api_client, checkin_info, register_no,
-                                    poll_attempts, poll_interval)
+    rsp, attempt, face_seen, expired = _poll(api_client, checkin_info, register_no,
+                                             poll_attempts, poll_interval)
     if rsp is not None:
         return rsp, attempt
     if not face_seen:
         raise RiskVerificationRequired("等待本人完成支付宝/人脸验证超时，未提交")
     _push_face_notice(config)
+    if expired:
+        logger.warning("验证已被平台作废 ⇒ 本次不尝试补卡（省额度），等下次重新申请登记号")
+        raise RiskVerificationRequired("打卡失败：人脸核验导致验证作废（本次未消耗补卡额度）")
     resp = _try_makeup(api_client, dict(checkin_info, outRegisterNo=register_no), config)
     return resp, attempt
