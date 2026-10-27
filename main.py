@@ -892,7 +892,6 @@ def run(config: ConfigManager,
                 logger.warning(f"UNKNOWN 跨轮收敛失败（忽略）: {e}")
 
         results = []
-        _all_results = results
         if task_decisions is not None:
             # Stage 5: 决策层禁用的任务——记 SKIPPED（带原因），不发任何请求
             for key in TASK_LABELS:
@@ -1101,7 +1100,9 @@ def _execute_tasks_impl(selected_files: Optional[List[str]] = None):
         for future in concurrent.futures.as_completed(future_to_task):
             task = future_to_task[future]
             try:
-                future.result()
+                _res = future.result()
+                if _res:                      # run() 返回每个账号的结果列表
+                    _all_results.extend(_res)
             except Exception as e:
                 logger.exception(f"任务处理过程中发生错误: {e}")
 
