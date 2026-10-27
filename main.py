@@ -1123,10 +1123,24 @@ def execute_tasks(selected_files: Optional[List[str]] = None):
                      stage="startup", action="立即退出",
                      result="另一进程持有运行锁")
         raise SystemExit(4)
+    results = []
     try:
-        _execute_tasks_impl(selected_files)
+        results = _execute_tasks_impl(selected_files) or []
     finally:
         run_lock.release()
+    # 2026-10-27：原来「账号可能全部失败」也返回 0 ⇒ Actions 一直「绿着失败」，
+    # 10-24~27 连续几天没打上卡却全绿。这里改成：有失败/未知且无一条成功时非零退出。
+    try:
+        status = [str((r or {}).get("status") or "").lower() for r in results]
+        bad = [s for s in status if s in ("fail", "unknown")]
+        ok = [s for s in status if s == "success"]
+        if bad and not ok:
+            logger.error(f"本轮全部失败/未知（{len(bad)} 条），以非零退出（9）让流水线变红")
+            raise SystemExit(9)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"退出码判定失败（忽略）: {exc}")
 
 
 if __name__ == "__main__":
