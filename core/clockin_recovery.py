@@ -79,12 +79,14 @@ def _poll(api_client, checkin_info, register_no, attempts, interval):
             logger.warning(f"第 {attempt}/{attempts} 次轮询仍为 304，继续等待授权")
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
-            # 2026-10-27 实测：风控升级到要求「人脸核验」，这是自动客户端做不到的终态。
-            # 继续轮询只会白占一个 runner 半小时（实测 56 次全失败），必须立刻中止。
+            # 2026-10-27 更正：**「人脸核验失败」不是终态**，而是「本人还没扫码」的中间态。
+            # 昨天（10-26）能打上卡的那次就是一直轮询、等人扫完脸后才成功的。
+            # 之前把它当终态立刻中止（33 秒就杀），反而把唯一可行的路径掐死了。
             if "人脸核验" in msg:
-                logger.error("平台要求人脸核验（无法自动完成），立即中止轮询，请人工处理")
-                raise TerminalPunchError(f"需要人脸核验，自动化无法完成: {msg}")
-            logger.warning(f"第 {attempt} 次轮询异常: {exc}")
+                if attempt in (1, 5, 11, 21, 41):
+                    logger.info(f"第 {attempt} 次轮询：等待本人完成人脸核验…")
+            else:
+                logger.warning(f"第 {attempt} 次轮询异常: {exc}")
     return None, 0
 
 
