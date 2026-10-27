@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 class TerminalPunchError(Exception):
     """自动化无法继续的终态错误（如人脸核验），不再重试。"""
 
-POLL_ATTEMPTS = 60   # 30 分钟（60×30s）：本人扫码有延迟，必须给满整个有效期
-POLL_INTERVAL = 30
+POLL_ATTEMPTS = 30   # 30 分钟（30×60s）：拉长间隔降低提交频次（今天实测一跑 56 次提交会加重风控）
+POLL_INTERVAL = 60
 REGISTER_TTL_SEC = 30 * 60      # 登记号有效期 30 分钟
 MAX_ROUNDS = 2                  # 两轮：第 1 轮跑满 30 分钟；登记号过期后才开第 2 轮（补卡），绝不提前发第二条链接
 
@@ -83,8 +83,14 @@ def _poll(api_client, checkin_info, register_no, attempts, interval):
             # 昨天（10-26）能打上卡的那次就是一直轮询、等人扫完脸后才成功的。
             # 之前把它当终态立刻中止（33 秒就杀），反而把唯一可行的路径掐死了。
             if "人脸核验" in msg:
-                if attempt in (1, 5, 11, 21, 41):
+                # 「还没扫」的中间态：继续等
+                if attempt in (1, 5, 10, 20, 30):
                     logger.info(f"第 {attempt} 次轮询：等待本人完成人脸核验…")
+            elif "验证已过期" in msg:
+                # 2026-10-27 实测：本人扫码后返回的就是这个 —— 说明扫码**消费/作废**了登记号，
+                # 而不是授权它。继续拿它提交只会再撞 46 次同样的错，还白白加重风控。
+                logger.warning("登记号已失效（本人扫码后即作废），本轮停止轮询")
+                break
             else:
                 logger.warning(f"第 {attempt} 次轮询异常: {exc}")
     return None, 0
