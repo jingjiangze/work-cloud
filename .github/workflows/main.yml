@@ -67,7 +67,7 @@ jobs:
 
       - name: Cancel remaining attempts on success
         if: success() && matrix.attempt == 1
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             // If attempt 1 succeeds, cancel the workflow (attempts 2,3 will be skipped)
