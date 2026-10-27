@@ -25,6 +25,10 @@ from coreApi.MainLogicApi import RiskVerificationRequired
 
 logger = logging.getLogger(__name__)
 
+
+class TerminalPunchError(Exception):
+    """自动化无法继续的终态错误（如人脸核验），不再重试。"""
+
 POLL_ATTEMPTS = 56   # 28 分钟，覆盖登记号 30 分钟有效期（授权晚一点也能落）
 POLL_INTERVAL = 30
 REGISTER_TTL_SEC = 30 * 60      # 登记号有效期 30 分钟
@@ -73,7 +77,13 @@ def _poll(api_client, checkin_info, register_no, attempts, interval):
             return rsp, attempt
         except RiskVerificationRequired:
             logger.warning(f"第 {attempt}/{attempts} 次轮询仍为 304，继续等待授权")
-        except Exception as exc:  # noqa: BLE001 - 网络类异常交由上层判定
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            # 2026-10-27 实测：风控升级到要求「人脸核验」，这是自动客户端做不到的终态。
+            # 继续轮询只会白占一个 runner 半小时（实测 56 次全失败），必须立刻中止。
+            if "人脸核验" in msg:
+                logger.error("平台要求人脸核验（无法自动完成），立即中止轮询，请人工处理")
+                raise TerminalPunchError(f"需要人脸核验，自动化无法完成: {msg}")
             logger.warning(f"第 {attempt} 次轮询异常: {exc}")
     return None, 0
 
@@ -128,8 +138,11 @@ def submit_with_recovery(
             pushed = _push_link(config, link, register_no, kind, round_no)
             logger.info("授权链接已推送" if pushed else "授权链接推送失败，仅记录日志")
 
-            rsp, attempt = _poll(api_client, checkin_info, register_no,
-                                 poll_attempts, poll_interval)
+            try:
+                rsp, attempt = _poll(api_client, checkin_info, register_no,
+                                     poll_attempts, poll_interval)
+            except TerminalPunchError:
+                raise
             if rsp is not None:
                 return rsp, attempt
 
