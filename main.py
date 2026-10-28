@@ -310,6 +310,23 @@ def perform_clock_in(
                     user_key, task_name, success_state_for(task_name),
                     submit_message,
                 )
+            # CHECKIN_BOTH=1：本账号允许在 30 分钟内把上/下班都打完。
+            # 成功一次后若服务端还缺另一张卡，就用同一登记号立刻补打。
+            if os.environ.get("CHECKIN_BOTH") and                     config.get_value("userInfo.userType") != "teacher":
+                _other = "END" if checkin_type == "START" else "START"
+                _other_label = "下班" if _other == "END" else "上班"
+                try:
+                    if not api_client.server_has_checkin(
+                            _other, current_time.date().isoformat()):
+                        logger.info(f"[BOTH] 服务端缺「{_other_label}」卡，用同一登记号补打")
+                        time.sleep(5)
+                        submit_with_recovery(
+                            api_client, dict(checkin_info, type=_other), config)
+                        logger.info(f"[BOTH] {_other_label}打卡成功")
+                    else:
+                        logger.info(f"[BOTH] 服务端已有「{_other_label}」卡，无需补打")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[BOTH] 补打「{_other_label}」失败（忽略）: {str(exc)[:120]}")
             return {
                 "status": "success",
                 "message": f"{display_type}打卡成功",
@@ -810,6 +827,14 @@ def run(config: ConfigManager,
         # L5: 启动前只读预检（0 次业务请求 + 至多 1 次 TCP 探测），
         # 关键条件不满足直接 STOP，不带着必败状态发起登录/提交
         report = run_preflight(config, state_store, user_key)
+        # 2026-10-28 实测：api.moguding.net:9000 从 GitHub runner 偶发不可达，
+        # 立刻重试通常就通（19:59 失败 → 20:00 成功）⇒ 自动重试 2 次、间隔 10s。
+        _pf_retry = 0
+        while report.should_stop and not report.benign and _pf_retry < 2:
+            _pf_retry += 1
+            logger.warning(f"[PREFLIGHT] 第 {_pf_retry} 次自动重试（{report.summary()}）")
+            time.sleep(10)
+            report = run_preflight(config, state_store, user_key)
         if report.should_stop:
             if report.benign:
                 results.append({
@@ -818,9 +843,14 @@ def run(config: ConfigManager,
                     "task_type": "预检",
                 })
             else:
+                # 网络类失败不推 PushPlus（抖动刷屏无意义），但流水线仍要红
+                try:
+                    config._no_push = True
+                except Exception:
+                    pass
                 results.append({
                     "status": "fail",
-                    "message": f"预检未通过: {report.summary()}",
+                    "message": f"预检未通过（已重试 {_pf_retry} 次）: {report.summary()}",
                     "task_type": "预检",
                 })
             return results
@@ -985,7 +1015,8 @@ def run(config: ConfigManager,
             logger.warning(f"执行台账记录失败（忽略）: {e}")
         # 推送收敛：本次已推过支付宝授权链接（304 闭环）时不再重复推结果，
         # 保证「一次打卡只收一条消息」。
-        if pusher and not getattr(config, "_action_pushed", False):
+        if (pusher and not getattr(config, "_action_pushed", False)
+                and not getattr(config, "_no_push", False)):
             try:
                 pusher.push(results)
             except Exception as e:

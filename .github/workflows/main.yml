@@ -119,6 +119,8 @@ jobs:
           TZ: Asia/Shanghai
           CHECKIN_TYPE: ${{ github.event.inputs.type }}
           CHECKIN_RETRY_ONLY: ${{ github.event.inputs.mode == 'retry' && '1' || '' }}
+          # 一次扫码后把上/下班两张卡都打完（同一登记号）
+          CHECKIN_BOTH: ${{ github.event.inputs.mode == 'retry' && '1' || '' }}
           CHECKIN_FORCE_NEW: ${{ github.event.inputs.mode == 'new' && '1' || '' }}
           # Linux 上 USER 默认是 runner，main.py 会拿它当 JSON 解析并刷一条错误日志；
           # 显式置空让它走 user/*.json 那条路（也是唯一会回写登记号的路径）。
