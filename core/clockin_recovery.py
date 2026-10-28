@@ -17,6 +17,8 @@
 主流程收尾时不再重复推一条结果——**一次打卡只收一条消息**。
 """
 
+import hashlib
+import hmac
 import logging
 import os
 import time
@@ -43,6 +45,24 @@ def build_click_link(register_url: str) -> str:
     return "https://ds.alipay.com/?scheme=" + quote(register_url, safe="")
 
 
+def _trigger_buttons(kind):
+    """一键重试按钮：token = HMAC(secret, 日期|类型|用途)，当天有效、跨天自动失效。"""
+    secret = os.environ.get("GX_TRIGGER_SECRET") or ""
+    base = (os.environ.get("GX_TRIGGER_BASE") or "").rstrip("/")
+    if not secret or not base:
+        return ""
+    day = time.strftime("%Y-%m-%d")
+    t = kind.upper()
+
+    def _tok(purpose):
+        msg = ("%s|%s|%s" % (day, t, purpose)).encode()
+        return hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()[:24]
+
+    return ('<p><a href="%s/gx/retry?type=%s&t=%s">✅ 我已扫完，立即补打</a></p>'
+            '<p><a href="%s/gx/new?type=%s&t=%s">🔄 链接失效？重新生成</a></p>'
+            % (base, t, _tok("retry"), base, t, _tok("new")))
+
+
 def _push_link(config, link: str, register_no: str, kind: str, round_no: int) -> bool:
     """把授权链接推送给人；失败只记日志，不阻断流程。"""
     try:
@@ -56,7 +76,7 @@ def _push_link(config, link: str, register_no: str, kind: str, round_no: int) ->
             "<p>登记号：<code>%s</code>（30 分钟内有效）</p>"
             "<p>授权后脚本会自动补打，无需再操作；若仍未成功，下一轮会自动补卡并再发链接。</p>"
             % (kind or "本次", title_suffix, link, register_no)
-        )
+        ) + _trigger_buttons(kind)
         pusher.push_custom("[ACTION] 工学云打卡需要支付宝验证", html, html)
         # 收敛：本次运行已推送可操作消息，收尾不再重复推结果
         try:
