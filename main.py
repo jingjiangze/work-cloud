@@ -1135,12 +1135,17 @@ def execute_tasks(selected_files: Optional[List[str]] = None):
     # 2026-10-27：原来「账号可能全部失败」也返回 0 ⇒ Actions 一直「绿着失败」，
     # 10-24~27 连续几天没打上卡却全绿。这里改成：有失败/未知且无一条成功时非零退出。
     try:
-        # 只看**打卡**任务：日报/周报成功不能掩盖打卡失败
-        punch = [r for r in results if "打卡" in str((r or {}).get("task_type") or "")]
-        st = [str((r or {}).get("status") or "").lower() for r in punch]
-        if st and not any(s == "success" for s in st):
-            logger.error("打卡任务未成功（%s），以非零退出（9）让流水线变红"
-                         % ",".join(st))
+        # 只看「打卡 / 预检」这类关键任务：日报周报成功不能掩盖它们失败。
+        # 2026-10-28 实测漏洞：08:28 那次是「预检未通过: 网络不可达」，
+        # 结果里没有 task_type 含「打卡」的项 ⇒ 旧判据漏判、流水线还绿。
+        watch = [r for r in results
+                 if any(k in str((r or {}).get("task_type") or "") for k in ("打卡", "预检"))]
+        bad = [r for r in watch
+               if str((r or {}).get("status") or "").lower() in ("fail", "unknown")]
+        if bad:
+            logger.error("关键任务未成功（%s），以非零退出（9）让流水线变红"
+                         % "; ".join("%s=%s" % (r.get("task_type"), r.get("status"))
+                                     for r in bad)[:200])
             raise SystemExit(9)
     except SystemExit:
         raise
