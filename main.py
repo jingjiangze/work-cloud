@@ -23,7 +23,8 @@ from util.report_validator import (
     record_report,
     DEFAULT_MIN_LENGTH,
 )
-from core.clockin_recovery import submit_with_recovery
+from core.clockin_recovery import (submit_with_recovery, build_click_link,
+                                   _mark_register, _push_link)
 from coreApi.auth_checker import ensure_login
 from models.execution_history import append_entry
 from util.preflight import run_preflight
@@ -325,15 +326,19 @@ def perform_clock_in(
                 try:
                     if not api_client.server_has_checkin(
                             _other, current_time.date().isoformat()):
-                        logger.info(f"[BOTH] 服务端缺「{_other_label}」卡，用同一登记号补打")
-                        time.sleep(5)
-                        submit_with_recovery(
-                            api_client, dict(checkin_info, type=_other), config)
-                        logger.info(f"[BOTH] {_other_label}打卡成功")
+                        # 2026-10-28 实测：一个登记号只能用一次（复用打第二张直接「验证已过期」）。
+                        # 所以为第二张卡申请**新**登记号并推链接，本人再扫一次即可。
+                        logger.info(f"[BOTH] 服务端缺「{_other_label}」卡 ⇒ 申请新登记号并推链接")
+                        _reg = api_client.create_alipay_register()
+                        _mark_register(config, _reg["outRegisterNo"], time.time())
+                        _push_link(config, build_click_link(_reg["registerUrl"]),
+                                   _reg["outRegisterNo"], _other, 1)
+                        logger.info(f"[BOTH] 已推送「{_other_label}」卡的授权链接，"
+                                    f"等本人扫码后由 retry 补打")
                     else:
                         logger.info(f"[BOTH] 服务端已有「{_other_label}」卡，无需补打")
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"[BOTH] 补打「{_other_label}」失败（忽略）: {str(exc)[:120]}")
+                    logger.warning(f"[BOTH] 为「{_other_label}」卡申请登记号失败（忽略）: {str(exc)[:120]}")
             return {
                 "status": "success",
                 "message": f"{display_type}打卡成功",
