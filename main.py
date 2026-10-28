@@ -24,7 +24,7 @@ from util.report_validator import (
     DEFAULT_MIN_LENGTH,
 )
 from core.clockin_recovery import (submit_with_recovery, build_click_link,
-                                   _mark_register, _push_link)
+                                   _mark_register, _push_link, request_redispatch)
 from coreApi.auth_checker import ensure_login
 from models.execution_history import append_entry
 from util.preflight import run_preflight
@@ -174,6 +174,14 @@ def _report_exists_on_server(api_client: ApiClient, report_type: str,
     return False
 
 
+def _checkin_type_hint() -> str:
+    """本次要打的是上班还是下班卡：CHECKIN_TYPE 显式指定优先，否则按小时推断。"""
+    forced = (os.environ.get("CHECKIN_TYPE") or "").strip().upper()
+    if forced in ("START", "END"):
+        return forced
+    return "START" if datetime.now().hour < 12 else "END"
+
+
 def perform_clock_in(
     api_client: ApiClient,
     config: ConfigManager,
@@ -184,9 +192,7 @@ def perform_clock_in(
     task_name = "checkin"
     # 幂等门禁必须按「上/下班」分别记：否则同一账号当天打完一张，另一张会被误跳过
     # （用户规则：30 分钟内可把上下班都打完）
-    _type_hint = (os.environ.get("CHECKIN_TYPE") or "").strip().upper()
-    if _type_hint not in ("START", "END"):
-        _type_hint = "START" if datetime.now().hour < 12 else "END"
+    _type_hint = _checkin_type_hint()
     state_key = "checkin_%s" % _type_hint
     # Stage 2 幂等保护：本地状态显示当日已成功则直接跳过（服务端检查仍保留兜底）
     if state_store and state_store.is_done(user_key, state_key):
@@ -860,6 +866,13 @@ def run(config: ConfigManager,
                     config._no_push = True
                 except Exception:
                     pass
+                # 同一台 runner 连续 3 次不可达 ⇒ 请 ECS 换一台 runner 重派：
+                # 单机重试只能覆盖抖动，覆盖不了这台机器的出口路由故障。
+                try:
+                    if "网络不可达" in report.summary():
+                        request_redispatch(_checkin_type_hint())
+                except Exception as exc:  # noqa: BLE001 - 重派失败不影响判定
+                    logger.warning(f"[REDISPATCH] 跳过: {exc}")
                 results.append({
                     "status": "fail",
                     "message": f"预检未通过（已重试 {_pf_retry} 次）: {report.summary()}",
