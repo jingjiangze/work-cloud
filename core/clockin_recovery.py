@@ -22,6 +22,7 @@ import hmac
 import logging
 import os
 import time
+import urllib.request
 from urllib.parse import quote
 
 from coreApi.MainLogicApi import RiskVerificationRequired
@@ -45,22 +46,59 @@ def build_click_link(register_url: str) -> str:
     return "https://ds.alipay.com/?scheme=" + quote(register_url, safe="")
 
 
-def _trigger_buttons(kind):
-    """一键重试按钮：token = HMAC(secret, 日期|类型|用途)，当天有效、跨天自动失效。"""
+def _trigger_secret_base():
     secret = os.environ.get("GX_TRIGGER_SECRET") or ""
     base = (os.environ.get("GX_TRIGGER_BASE") or "").rstrip("/")
-    if not secret or not base:
+    return secret, base
+
+
+def trigger_token(kind, purpose):
+    """HMAC(secret, "日期|类型|用途")[:24]；当天有效、跨天自动失效。"""
+    secret, _ = _trigger_secret_base()
+    if not secret:
         return ""
     day = time.strftime("%Y-%m-%d")
-    t = kind.upper()
+    msg = ("%s|%s|%s" % (day, str(kind).upper(), purpose)).encode()
+    return hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()[:24]
 
-    def _tok(purpose):
-        msg = ("%s|%s|%s" % (day, t, purpose)).encode()
-        return hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()[:24]
 
-    return ('<p><a href="%s/gx/retry?type=%s&t=%s">✅ 我已扫完，立即补打</a></p>'
-            '<p><a href="%s/gx/new?type=%s&t=%s">🔄 链接失效？重新生成</a></p>'
-            % (base, t, _tok("retry"), base, t, _tok("new")))
+def trigger_url(kind, purpose, extra=""):
+    secret, base = _trigger_secret_base()
+    tok = trigger_token(kind, purpose)
+    if not (secret and base and tok):
+        return ""
+    return "%s/gx/%s?type=%s&t=%s%s" % (base, purpose, str(kind).upper(), tok, extra)
+
+
+def _trigger_buttons(kind):
+    """一键重试按钮：token = HMAC(secret, 日期|类型|用途)，当天有效、跨天自动失效。"""
+    retry_url = trigger_url(kind, "retry")
+    new_url = trigger_url(kind, "new")
+    if not (retry_url and new_url):
+        return ""
+    return ('<p><a href="%s">✅ 我已扫完，立即补打</a></p>'
+            '<p><a href="%s">🔄 链接失效？重新生成</a></p>'
+            % (retry_url, new_url))
+
+
+def request_redispatch(kind, delay_sec=180, timeout=8):
+    """预检网络不可达时，请 ECS 稍后换一台 runner 重派。
+
+    2026-10-28 实测：同一台 runner 连续 3 次 TCP 不可达（api.moguding.net:9000），
+    但换一台 runner 立刻就通 ⇒ 单机的重试只能覆盖抖动，覆盖不了单机路由故障。
+    """
+    url = trigger_url(kind, "auto", "&d=%d" % max(60, min(900, int(delay_sec))))
+    if not url:
+        logger.warning("[REDISPATCH] 未配置 GX_TRIGGER_SECRET/BASE，跳过换机重派")
+        return False
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as rsp:
+            body = rsp.read(300).decode("utf-8", "replace")
+            logger.warning(f"[REDISPATCH] 已请求 %d 秒后换机重派: {body}")
+            return True
+    except Exception as exc:  # noqa: BLE001 - 重派失败不得影响主流程
+        logger.warning(f"[REDISPATCH] 请求失败（忽略）: {exc}")
+        return False
 
 
 def _push_link(config, link: str, register_no: str, kind: str, round_no: int) -> bool:
