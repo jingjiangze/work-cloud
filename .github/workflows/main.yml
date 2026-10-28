@@ -123,7 +123,7 @@ jobs:
           CHECKIN_BOTH: ${{ github.event.inputs.mode == 'retry' && '1' || '' }}
           # 一键重试按钮（token 当天有效）
           GX_TRIGGER_SECRET: ${{ secrets.GX_TRIGGER_SECRET }}
-          GX_TRIGGER_BASE: https://gongxue.jiangjiangze.icu:8443
+          GX_TRIGGER_BASE: http://118.190.106.170
           CHECKIN_FORCE_NEW: ${{ github.event.inputs.mode == 'new' && '1' || '' }}
           # Linux 上 USER 默认是 runner，main.py 会拿它当 JSON 解析并刷一条错误日志；
           # 显式置空让它走 user/*.json 那条路（也是唯一会回写登记号的路径）。
