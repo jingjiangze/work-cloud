@@ -181,9 +181,15 @@ def perform_clock_in(
 ) -> Dict[str, Any]:
     """执行打卡操作"""
     task_name = "checkin"
+    # 幂等门禁必须按「上/下班」分别记：否则同一账号当天打完一张，另一张会被误跳过
+    # （用户规则：30 分钟内可把上下班都打完）
+    _type_hint = (os.environ.get("CHECKIN_TYPE") or "").strip().upper()
+    if _type_hint not in ("START", "END"):
+        _type_hint = "START" if datetime.now().hour < 12 else "END"
+    state_key = "checkin_%s" % _type_hint
     # Stage 2 幂等保护：本地状态显示当日已成功则直接跳过（服务端检查仍保留兜底）
-    if state_store and state_store.is_done(user_key, task_name):
-        logger.info("本地状态显示今日打卡已完成，跳过")
+    if state_store and state_store.is_done(user_key, state_key):
+        logger.info(f"本地状态显示今日「{state_key}」已完成，跳过")
         return {
             "status": "skip",
             "message": "今日打卡已完成（本地状态）",
@@ -236,7 +242,7 @@ def perform_clock_in(
 
         if should_skip:
             if state_store:
-                state_store.mark(user_key, task_name, "SKIPPED", skip_message)
+                state_store.mark(user_key, state_key, "SKIPPED", skip_message)
             return {
                 "status": "skip",
                 "message": skip_message,
@@ -244,7 +250,7 @@ def perform_clock_in(
             }
 
         if state_store:
-            state_store.mark(user_key, task_name, running_state_for(task_name))
+            state_store.mark(user_key, state_key, running_state_for(state_key))
 
         last_checkin_info = api_client.get_checkin_info()
 
@@ -308,7 +314,7 @@ def perform_clock_in(
             logger.info(f"用户 {user_name} {display_type} 打卡成功")
             if state_store:
                 state_store.mark(
-                    user_key, task_name, success_state_for(task_name),
+                    user_key, state_key, success_state_for(state_key),
                     submit_message,
                 )
             # CHECKIN_BOTH=1：本账号允许在 30 分钟内把上/下班都打完。
@@ -342,12 +348,12 @@ def perform_clock_in(
         if status == "unknown":
             logger.error(f"打卡最终状态未知: {submit_message}")
             if state_store:
-                state_store.mark(user_key, task_name, STATE_UNKNOWN, submit_message)
+                state_store.mark(user_key, state_key, STATE_UNKNOWN, submit_message)
             return {"status": "unknown", "message": submit_message,
                     "task_type": "打卡"}
         logger.error(f"打卡失败: {submit_message}")
         if state_store:
-            state_store.mark(user_key, task_name, STATE_FAILED, submit_message)
+            state_store.mark(user_key, state_key, STATE_FAILED, submit_message)
         return {"status": "fail", "message": submit_message, "task_type": "打卡"}
     except CaptchaExhaustedError as e:
         # L4: 验证码熔断 —— 停止当前任务，阻断本用户后续任务
@@ -355,7 +361,7 @@ def perform_clock_in(
         record_event(user_key, "打卡", EVENT_CAPTCHA_CIRCUIT_BREAK,
                      stage="submit", action="熔断停止", result=str(e))
         if state_store:
-            state_store.mark(user_key, task_name, STATE_FAILED, f"验证码熔断: {e}")
+            state_store.mark(user_key, state_key, STATE_FAILED, f"验证码熔断: {e}")
         return {"status": "fail", "message": f"验证码熔断: {str(e)}",
                 "task_type": "打卡", "captcha_exhausted": True}
     except SubmitUnknownError as e:
@@ -364,14 +370,14 @@ def perform_clock_in(
         record_event(user_key, "打卡", EVENT_SUBMIT_UNKNOWN,
                      stage="submit", action="标记UNKNOWN", result=str(e))
         if state_store:
-            state_store.mark(user_key, task_name, STATE_UNKNOWN, str(e))
+            state_store.mark(user_key, state_key, STATE_UNKNOWN, str(e))
         return {"status": "unknown",
                 "message": f"打卡提交结果未知（待服务端核验）: {str(e)}",
                 "task_type": "打卡"}
     except Exception as e:
         logger.error(f"打卡失败: {e}")
         if state_store:
-            state_store.mark(user_key, task_name, STATE_FAILED, str(e))
+            state_store.mark(user_key, state_key, STATE_FAILED, str(e))
         return {"status": "fail", "message": f"打卡失败: {str(e)}", "task_type": "打卡"}
 
 
