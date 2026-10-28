@@ -22,7 +22,7 @@ jobs:
         env:
           TZ: Asia/Shanghai
           GX_TRIGGER_SECRET: ${{ secrets.GX_TRIGGER_SECRET }}
-          GX_TRIGGER_BASE: https://gongxue.jiangjiangze.icu:8443
+          GX_TRIGGER_BASE: http://118.190.106.170
           CTYPE: ${{ github.event.inputs.type }}
         run: |
           python3 - <<'PY'
