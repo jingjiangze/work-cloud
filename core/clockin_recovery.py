@@ -187,10 +187,14 @@ def submit_with_recovery(
       * 轮询里「人脸核验失败」= 还没扫，继续等；「验证已过期」= 登记号作废，本轮停。
     """
     retry_only = bool(os.environ.get("CHECKIN_RETRY_ONLY"))
+    # mode=new：忽略已存登记号、忽略「当日需人脸核验」短路，强制申请新登记号并推链接
+    force_new = bool(os.environ.get("CHECKIN_FORCE_NEW"))
     kind = str(checkin_info.get("type") or "")
 
     # ---- 1) 先试一次：复用现有有效登记号（没有就不带）
-    reuse_no, reuse_ts = _fresh_register(config)
+    reuse_no, reuse_ts = (None, 0) if force_new else _fresh_register(config)
+    if force_new:
+        logger.info("CHECKIN_FORCE_NEW=1：忽略已存登记号，强制申请新的并推送链接")
     probe = dict(checkin_info)
     if reuse_no:
         probe["outRegisterNo"] = reuse_no
@@ -210,7 +214,7 @@ def submit_with_recovery(
                 _push_face_notice(config)   # 记下当日需人脸核验，后续运行短路
             raise
 
-    if str(config.get_value("config.clockIn.faceNoticeDate") or "") == time.strftime("%Y-%m-%d"):
+    if (not force_new) and str(config.get_value("config.clockIn.faceNoticeDate") or "") == time.strftime("%Y-%m-%d"):
         # 当日已确认需人脸核验。补卡必须有「可扫的新链接」才有意义：
         # 若当前没有有效登记号（或已过期），先申请并推送一条，再走补卡。
         if not reuse_no:
