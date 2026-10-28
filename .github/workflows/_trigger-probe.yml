@@ -1,0 +1,53 @@
+name: trigger-token-probe
+
+# 只读探针：用仓库里的 GX_TRIGGER_SECRET 现算 token，去 ECS 触发器做 dry 校验。
+# 输出只有 HTTP 状态（200=密钥一致 / 403=密钥不一致），**不打印 token**（仓库是 public）。
+# 用途：一键补打按钮上线前/改密钥后确认 PushPlus 里的按钮真的能点通。
+on:
+  workflow_dispatch:
+    inputs:
+      type:
+        description: "START 或 END"
+        required: true
+        default: "END"
+        type: choice
+        options: [START, END]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe trigger endpoints
+        env:
+          TZ: Asia/Shanghai
+          GX_TRIGGER_SECRET: ${{ secrets.GX_TRIGGER_SECRET }}
+          GX_TRIGGER_BASE: https://gongxue.jiangjiangze.icu:8443
+          CTYPE: ${{ github.event.inputs.type }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, hmac, os, time, urllib.request, urllib.error
+          secret = os.environ["GX_TRIGGER_SECRET"] or ""
+          base = os.environ["GX_TRIGGER_BASE"].rstrip("/")
+          typ = os.environ["CTYPE"].upper()
+          day = time.strftime("%Y-%m-%d")
+          print("secret_len=%d day=%s type=%s" % (len(secret), day, typ))
+          ok = True
+          for purpose in ("retry", "new", "auto"):
+              tok = hmac.new(secret.encode(), ("%s|%s|%s" % (day, typ, purpose)).encode(),
+                             hashlib.sha256).hexdigest()[:24]
+              url = "%s/gx/%s?type=%s&t=%s&dry=1" % (base, purpose, typ, tok)
+              try:
+                  with urllib.request.urlopen(url, timeout=20) as r:
+                      code, body = r.status, r.read(200).decode("utf-8", "replace")
+              except urllib.error.HTTPError as e:
+                  code, body = e.code, e.read(200).decode("utf-8", "replace")
+              except Exception as e:
+                  code, body = 0, repr(e)[:120]
+              verdict = "OK" if code == 200 else "MISMATCH"
+              if code != 200:
+                  ok = False
+              print("%-6s http=%s %s %s" % (purpose, code, verdict, body))
+          print("RESULT=%s" % ("PASS" if ok else "FAIL"))
+          raise SystemExit(0 if ok else 1)
+          PY
