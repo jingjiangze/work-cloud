@@ -108,13 +108,18 @@ def _push_link(config, link: str, register_no: str, kind: str, round_no: int) ->
 
         pusher = MessagePusher(config.get_value("config.pushNotifications") or [])
         title_suffix = "（补卡，第 %d 次）" % round_no if round_no > 1 else ""
+        buttons = _trigger_buttons(kind)
+        if buttons:
+            logger.info("[PUSH] 消息已附带一键按钮（retry/new）")
+        else:
+            logger.warning("[PUSH] 未附带一键按钮：GX_TRIGGER_SECRET / GX_TRIGGER_BASE 未配置")
         html = (
             "<p><b>%s打卡被风控拦截</b>（304，需支付宝安全验证）%s。</p>"
             "<p><a href=\"%s\">👉 点这里完成支付宝授权</a></p>"
             "<p>登记号：<code>%s</code>（30 分钟内有效）</p>"
-            "<p>授权后脚本会自动补打，无需再操作；若仍未成功，下一轮会自动补卡并再发链接。</p>"
+            "<p>授权后点下面的按钮补打；若链接过期也能一键重新生成。</p>"
             % (kind or "本次", title_suffix, link, register_no)
-        ) + _trigger_buttons(kind)
+        ) + buttons
         pusher.push_custom("[ACTION] 工学云打卡需要支付宝验证", html, html)
         # 收敛：本次运行已推送可操作消息，收尾不再重复推结果
         try:
