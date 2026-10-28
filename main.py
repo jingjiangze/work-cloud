@@ -182,6 +182,26 @@ def _checkin_type_hint() -> str:
     return "START" if datetime.now().hour < 12 else "END"
 
 
+def _resolve_checkin_type(api_client) -> str:
+    """上班卡优先：服务端今天还没有上班卡，就先补上班，再轮到下班。
+
+    否则过了中午，所有自动路径（含 retry 定时器）都按小时推断成 END，
+    上班卡缺着也没人管——2026-10-28 实测正是这个形态（下班卡 20:00 成功，
+    上班卡一直空着，后续每次重试都在重打下班卡）。
+    """
+    hint = _checkin_type_hint()
+    if hint == "START" or api_client is None:
+        return hint
+    try:
+        today = datetime.now().date().isoformat()
+        if not api_client.server_has_checkin("START", today):
+            logger.info(f"服务端今日缺上班卡 ⇒ 优先补上班（原判定 {hint}）")
+            return "START"
+    except Exception as exc:  # noqa: BLE001 - 查不到就按原判定走，别阻断打卡
+        logger.warning(f"查询服务端上班卡失败，按原判定 {hint} 继续: {str(exc)[:100]}")
+    return hint
+
+
 def perform_clock_in(
     api_client: ApiClient,
     config: ConfigManager,
@@ -190,10 +210,14 @@ def perform_clock_in(
 ) -> Dict[str, Any]:
     """执行打卡操作"""
     task_name = "checkin"
+    # 打卡类型必须**先定下来再判幂等**：上班卡优先可能把 END 改判成 START，
+    # 若先用 CHECKIN_TYPE 算 state_key，会把「上班卡」的成功记到「下班卡」名下。
+    checkin_type = _resolve_checkin_type(api_client)
+    display_type = "上班" if checkin_type == "START" else "下班"
     # 幂等门禁必须按「上/下班」分别记：否则同一账号当天打完一张，另一张会被误跳过
     # （用户规则：30 分钟内可把上下班都打完）
-    _type_hint = _checkin_type_hint()
-    state_key = "checkin_%s" % _type_hint
+    state_key = "checkin_%s" % checkin_type
+    logger.info(f"本次打卡类型：{checkin_type}（{display_type}）")
     # Stage 2 幂等保护：本地状态显示当日已成功则直接跳过（服务端检查仍保留兜底）
     if state_store and state_store.is_done(user_key, state_key):
         logger.info(f"本地状态显示今日「{state_key}」已完成，跳过")
@@ -204,22 +228,6 @@ def perform_clock_in(
         }
     try:
         current_time = datetime.now()
-        current_hour = current_time.hour
-
-        # 确定打卡类型
-        # 2026-10-27：允许外部显式指定（ECS 定时器按 08:25/17:25 派发时传 START/END）。
-        # 历史上 GitHub cron 延迟 4 小时，导致上班卡被 `hour<12` 误判成下班卡。
-        _forced = (os.getenv("CHECKIN_TYPE") or "").strip().upper()
-        if _forced in ("START", "END"):
-            checkin_type = _forced
-            display_type = "上班" if _forced == "START" else "下班"
-            logger.info(f"打卡类型由 CHECKIN_TYPE 指定: {_forced}")
-        elif current_hour < 12:
-            checkin_type = "START"
-            display_type = "上班"
-        else:
-            checkin_type = "END"
-            display_type = "下班"
 
         # 检查配置：是否跳过节假日/自定义日期
         clock_in_mode = config.get_value("config.clockIn.mode")
