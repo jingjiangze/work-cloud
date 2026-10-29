@@ -118,6 +118,7 @@ class ApiClient:
         data: Dict[str, Any],
         submit: bool = False,
         allow_302: bool = False,
+        allow_304: bool = False,
     ) -> Dict[str, Any]:
         """
         发送POST请求，并处理请求过程中可能发生的错误。
@@ -159,7 +160,11 @@ class ApiClient:
                         record_event(
                             getattr(self, "user_key", "unknown"), "request",
                             EVENT_CAPTCHA_REQUIRED, stage=f"attempt {attempt + 1}",
-                            action="raise_304", result=detail[:120])
+                            action="allow_304" if allow_304 else "raise_304",
+                            result=detail[:120])
+                        if allow_304:
+                            # 交给提交方先试点选验证码 + appUuid（官方客户端路径）
+                            return rsp
                         raise RiskVerificationRequired(
                             f"打卡未提交（msg=304 需要本人实名验证）: {detail}")
                     if msg == "302":
@@ -284,13 +289,19 @@ class ApiClient:
         raise CaptchaExhaustedError(
             f"滑块验证码连续 {max_attempts} 次未通过，熔断停止")
 
-    def solve_click_word_captcha(self, max_retries: int = 5) -> str:
-        """通过点选验证码（clickWord）"""
+    def solve_click_word_captcha(self, max_retries: int = 5) -> Dict[str, str]:
+        """通过点选验证码（clickWord）。
+
+        返回 {"clientUid": 申请验证码时用的 uid, "captcha": 加密票据}。
+        **clientUid 必须回传**：304 解除时要求把同一个 uid 作为 `appUuid` 一并提交，
+        服务端按 clientUid 把验证码与本次打卡绑定（只回 captcha 不认）。
+        """
         for retry in range(max_retries):
             try:
+                client_uid = str(uuid.uuid4()).replace("-", "")
                 captcha_endpoint = "/attendence/clock/v1/get"
                 captcha_request_payload = {
-                    "clientUid": str(uuid.uuid4()).replace("-", ""),
+                    "clientUid": client_uid,
                     "captchaType": "clickWord",
                 }
 
@@ -319,11 +330,14 @@ class ApiClient:
                 )
 
                 if verification_response.get("code") != 6111:
-                    return aes_encrypt(
-                        captcha_response["data"]["token"] + "---" + captcha_solution,
-                        captcha_response["data"]["secretKey"],
-                        "b64",
-                    )
+                    return {
+                        "clientUid": client_uid,
+                        "captcha": aes_encrypt(
+                            captcha_response["data"]["token"] + "---" + captcha_solution,
+                            captcha_response["data"]["secretKey"],
+                            "b64",
+                        ),
+                    }
                 
                 time.sleep(random.uniform(1, 3))
             except Exception as e:
@@ -609,15 +623,40 @@ class ApiClient:
         headers["user-agent"] = "Dart/3.7 (dart:io)"
         headers["content-type"] = "application/json"
 
-        response = self._post_request(url, headers, data, submit=True, allow_302=True)
+        response = self._post_request(url, headers, data, submit=True,
+                                      allow_302=True, allow_304=True)
         if response.get("msg") == "302":
             logger.info("检测到行为验证码，正在通过···")
-            data["captcha"] = self.solve_click_word_captcha()
+            data["captcha"] = self.solve_click_word_captcha()["captcha"]
             # RISK-C02 修复：二次提交必须校验结果，避免"假成功"
-            retry_response = self._post_request(url, headers, data, submit=True, allow_302=True)
+            retry_response = self._post_request(url, headers, data, submit=True,
+                                                allow_302=True, allow_304=True)
             if retry_response.get("msg") == "302":
                 # L4: 二次提交仍要求验证码 → 处理超限，熔断
                 raise CaptchaExhaustedError("验证码校验未通过（二次提交仍要求验证码），打卡未提交")
+            response = retry_response
+
+        if str(response.get("msg")) == "304":
+            # 304 = 需要安全验证。**官方 App 走的是「点选验证码 + appUuid」，不需要本人扫脸**；
+            # 之前我们直接跳去支付宝授权闭环，等于绕了一条最难的路。
+            # 2026-10-30 起先试这条路（公开在用的实现同一做法），不行再回落支付宝授权。
+            logger.warning("304 安全验证 ⇒ 先试点选验证码 + appUuid（官方客户端路径）")
+            try:
+                _cw = self.solve_click_word_captcha()
+            except Exception as exc:  # noqa: BLE001 - 交回上层走支付宝授权兜底
+                raise RiskVerificationRequired(
+                    f"打卡未提交（304 且点选验证码未通过: {str(exc)[:80]}）")
+            data["appUuid"] = _cw["clientUid"]
+            data["captcha"] = _cw["captcha"]
+            rsp2 = self._post_request(url, headers, data, submit=True,
+                                      allow_302=True, allow_304=True)
+            if str(rsp2.get("msg")) == "304":
+                detail = str(rsp2.get("data") or "")[:200]
+                raise RiskVerificationRequired(
+                    f"打卡未提交（点选验证码后仍 304）: {detail}")
+            if rsp2.get("msg") == "302":
+                raise CaptchaExhaustedError("304 之后仍被要求行为验证码，熔断")
+            logger.info("304 已用点选验证码解除，打卡完成")
 
     def submit_clock_in_replace(self, checkin_info: Dict[str, Any]) -> Dict[str, Any]:
         """提交补卡（attendence/attendanceReplace/v6/save）。
@@ -691,7 +730,7 @@ class ApiClient:
         response = self._post_request(url, headers, data, submit=True, allow_302=True)
         if response.get("msg") == "302":
             logger.info("补卡触发行为验证码，正在通过···")
-            data["captcha"] = self.solve_click_word_captcha()
+            data["captcha"] = self.solve_click_word_captcha()["captcha"]
             self._post_request(url, headers, data, submit=True, allow_302=True)
         return response
 
