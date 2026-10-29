@@ -36,7 +36,9 @@ class TerminalPunchError(Exception):
 POLL_ATTEMPTS = 0    # **不轮询**：实测每次提交都触发一次服务端人脸比对，
                      # 连续 4 次失败平台就把验证作废 ⇒ 只提交一次，等本人扫完由 retry 任务补提交
 POLL_INTERVAL = 180
-REGISTER_TTL_SEC = 30 * 60      # 登记号有效期 30 分钟
+REGISTER_TTL_SEC = 10 * 60      # 平台侧真正可提交的窗口远短于名义 30 分钟：
+                                 # 2026-10-29 实测 08:26 签发、08:35 提交已回「验证已过期」。
+                                 # 超过 10 分钟就当它已死，别再去撞——撞一次就烧掉 4 次提交预算中的一次。
 MAX_ROUNDS = 2
 MAKEUP_MAX_PER_MONTH = 2   # 补卡每月上限（平台侧限制，保守取 2）                  # 两轮：第 1 轮跑满 30 分钟；登记号过期后才开第 2 轮（补卡），绝不提前发第二条链接
 
@@ -116,7 +118,7 @@ def _push_link(config, link: str, register_no: str, kind: str, round_no: int) ->
         html = (
             "<p><b>%s打卡被风控拦截</b>（304，需支付宝安全验证）%s。</p>"
             "<p><a href=\"%s\">👉 点这里完成支付宝授权</a></p>"
-            "<p>登记号：<code>%s</code>（30 分钟内有效）</p>"
+            "<p>登记号：<code>%s</code>（平台侧只活约 10 分钟，请立刻扫）</p>"
             "<p>授权后点下面的按钮补打；若链接过期也能一键重新生成。</p>"
             % (kind or "本次", title_suffix, link, register_no)
         ) + buttons
@@ -166,8 +168,18 @@ def _poll(api_client, checkin_info, register_no, attempts, interval):
     return None, attempts, face_seen, expired
 
 
+def _stored_register(config):
+    """取出配置里记录的登记号，**不看年龄**（给「本人刚扫完」这一次提交用）。"""
+    try:
+        no = str(config.get_value("config.clockIn.outRegisterNo") or "").strip()
+        ts = int(config.get_value("config.clockIn.outRegisterNoIssuedAt") or 0)
+    except Exception:
+        return None, 0
+    return (no, ts) if no else (None, 0)
+
+
 def _fresh_register(config):
-    """取出仍在 30 分钟有效期内的登记号（跨运行复用）。
+    """取出仍在 TTL 内、值得拿去提交的登记号（跨运行复用）。
 
     ⭐这是**避免链接打架**的关键：每次 createAxdjk 都会让旧链接失效。
     实测 2026-10-27：78 分钟里创建了 6 个登记号，用户扫的链接被后续覆盖，
@@ -256,6 +268,13 @@ def submit_with_recovery(
 
     # ---- 1) 先试一次：复用现有有效登记号（没有就不带）
     reuse_no, reuse_ts = (None, 0) if force_new else _fresh_register(config)
+    if retry_only and not force_new and not reuse_no:
+        # 本人点了「我已扫完」：他刚扫完脸，平台可能仍认这个登记号，
+        # 哪怕已经超过我们 10 分钟的判据也照样只提交一次；失败由下面的 user-tap 补链兜底。
+        _no, _ts = _stored_register(config)
+        if _no:
+            reuse_no, reuse_ts = _no, _ts
+            logger.info(f"本人刚扫完 ⇒ 直接拿登记号 {_no} 提交一次（不再判 TTL）")
     if force_new:
         logger.info("CHECKIN_FORCE_NEW=1：忽略已存登记号，强制申请新的并推送链接")
     probe = dict(checkin_info)
