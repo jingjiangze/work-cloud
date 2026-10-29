@@ -273,6 +273,21 @@ def submit_with_recovery(
         logger.warning(f"{kind}打卡需要验证：{msg[:70]}")
         if retry_only:
             logger.info("CHECKIN_RETRY_ONLY=1：本次只做单次提交，不申请登记号、不推送链接")
+            # 本人点了按钮却撞上「验证已过期」= 他手上那条链接早作废了。人就在手机前，
+            # 当场补发一条新链接，比让他自己去找第二个按钮更靠谱。
+            # 定时器绝不许走这条路：三条定时重试各开一个登记号会互相覆盖（10-27 事故）。
+            if ("验证已过期" in msg) and os.environ.get("CHECKIN_USER_TAP"):
+                logger.info("本人点按钮但登记号已失效 ⇒ 当场补发一条新链接")
+                try:
+                    reg = api_client.create_alipay_register()
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(f"申请新登记号失败: {exc}")
+                    raise
+                _mark_register(config, reg["outRegisterNo"], time.time())
+                _push_link(config, build_click_link(reg["registerUrl"]),
+                           reg["outRegisterNo"], kind, 1)
+                raise RiskVerificationRequired(
+                    "登记号已过期，已补发新链接：请扫新链接后再点一次「我已扫完」")
             if "人脸核验" in msg:
                 _push_face_notice(config)   # 记下当日需人脸核验，后续运行短路
             raise
@@ -326,7 +341,7 @@ def submit_with_recovery(
     if not face_seen:
         raise RiskVerificationRequired(
             "已推送授权链接；本轮按设计不轮询（避免打死验证），"
-            "等本人扫码后由 08:35/08:43 的 retry 任务补提交")
+            "等本人扫码后由 08:35/08:52 的 retry 任务补提交")
     _push_face_notice(config)
     if expired:
         logger.warning("验证已被平台作废 ⇒ 本次不尝试补卡（省额度），等下次重新申请登记号")
