@@ -616,10 +616,9 @@ class ApiClient:
         _apply_location_jitter(data)
 
         headers = self._get_authenticated_headers(sign_data)
-        # 2026-10-29：客户端指纹对齐官方 App（与补卡端点同一套头）。
-        # 判据：同一账号、同一时段，补卡端点用 Dart/3.7 + 纯 application/json 拿到的是
-        # 「人脸核验失败」，而打卡端点用 Dart/2.17 + charset 立刻被判 304「非官方客户端」；
-        # 两处 version 都是 5.31.6 ⇒ 剩下的差异项只有 UA 与 content-type。
+        # 2026-10-30 实测记录：把这里换成官方 App 的 Dart/3.7 + 纯 application/json 之后
+        # **仍然 304**（同一账号同一天，手机 App 却能正常打卡、无验证）⇒ 客户端指纹不在
+        # UA / content-type 这两项上，改这里不解决问题。保留对齐是因为它无副作用。
         headers["user-agent"] = "Dart/3.7 (dart:io)"
         headers["content-type"] = "application/json"
 
