@@ -602,6 +602,12 @@ class ApiClient:
         _apply_location_jitter(data)
 
         headers = self._get_authenticated_headers(sign_data)
+        # 2026-10-29：客户端指纹对齐官方 App（与补卡端点同一套头）。
+        # 判据：同一账号、同一时段，补卡端点用 Dart/3.7 + 纯 application/json 拿到的是
+        # 「人脸核验失败」，而打卡端点用 Dart/2.17 + charset 立刻被判 304「非官方客户端」；
+        # 两处 version 都是 5.31.6 ⇒ 剩下的差异项只有 UA 与 content-type。
+        headers["user-agent"] = "Dart/3.7 (dart:io)"
+        headers["content-type"] = "application/json"
 
         response = self._post_request(url, headers, data, submit=True, allow_302=True)
         if response.get("msg") == "302":
