@@ -21,6 +21,14 @@ on:
           - auto
           - new
           - retry
+      origin:
+        description: "触发来源：user=本人点了 PushPlus 按钮（人在手机前），timer=ECS 定时器/自动重派"
+        required: false
+        default: "timer"
+        type: choice
+        options:
+          - timer
+          - user
   # schedule 已于 2026-10-25 停用：GitHub 定时实测延迟 3h57m~4h35m，
   # cron 08:37(北京) 实际 13:12 才启动 ⇒ 上班卡被误判成下班卡。
   # 现由 ECS systemd timer 精确 dispatch（08:25 START / 17:25 END）。
@@ -125,6 +133,8 @@ jobs:
           GX_TRIGGER_SECRET: ${{ secrets.GX_TRIGGER_SECRET }}
           GX_TRIGGER_BASE: http://118.190.106.170
           CHECKIN_FORCE_NEW: ${{ github.event.inputs.mode == 'new' && '1' || '' }}
+          # 本人点了按钮（而不是定时器）⇒ 人就在手机前，登记号失效时可以当场补发新链接
+          CHECKIN_USER_TAP: ${{ github.event.inputs.origin == 'user' && '1' || '' }}
           # Linux 上 USER 默认是 runner，main.py 会拿它当 JSON 解析并刷一条错误日志；
           # 显式置空让它走 user/*.json 那条路（也是唯一会回写登记号的路径）。
           USER: ""
