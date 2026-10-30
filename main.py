@@ -24,7 +24,8 @@ from util.report_validator import (
     DEFAULT_MIN_LENGTH,
 )
 from core.clockin_recovery import (submit_with_recovery, build_click_link,
-                                   _mark_register, _push_link, request_redispatch)
+                                   _mark_register, _push_link, request_redispatch,
+                                   _fresh_register)
 from coreApi.auth_checker import ensure_login
 from models.execution_history import append_entry
 from util.preflight import run_preflight
@@ -213,6 +214,15 @@ def _resolve_checkin_type(api_client) -> str:
     return hint
 
 
+def _mark_push_slot(config, key: str, slot: str) -> None:
+    """落盘「本时段已推送」标记；跨 run 生效（user/*.json 随 actions/cache 保存）。"""
+    try:
+        config.update_config(slot, "config", "clockIn", key)
+        logger.info(f"已记录推送标记 {key}={slot}")
+    except Exception as exc:  # noqa: BLE001 - 标记写不进去最多是重复打扰，不能影响主流程
+        logger.warning(f"写推送标记失败（忽略）: {exc}")
+
+
 def _push_reminder(config, display_type: str) -> bool:
     """只发一条「该打卡了」的提醒：不含链接、不提交、不占 4 次提交预算。"""
     try:
@@ -253,8 +263,33 @@ def _run_remind_or_fallback(api_client, config, checkin_type: str,
                 "message": f"今日{display_type}卡已打，无需动作",
                 "task_type": "打卡"}
 
+    # 2026-10-30：跨 run 去重。定时器补跑 / 换机重派 / 手工触发会让同一时段跑多次，
+    # 而 `_action_pushed` 只在单进程内有效（进程一退就归零）⇒ 必须落盘一个「本时段已推过」标记。
+    # 标记存 config.clockIn.*（user/*.json，随 cache 跨 run 持久），写法照 faceNoticeDate。
+    slot = "%s|%s" % (today, "AM" if datetime.now().hour < 12 else "PM")
+    sent_remind = str(config.get_value("config.clockIn.remindSentSlot") or "")
+    sent_link = str(config.get_value("config.clockIn.fallbackSentSlot") or "")
+
+    if fallback:
+        if sent_link == slot:
+            logger.info(f"[{slot}] 本时段已推送过兜底链接 ⇒ 跳过（不重复打扰）")
+            return {"status": "skip", "message": "本时段已推送过兜底链接",
+                    "task_type": "打卡"}
+        # 已有 10 分钟内新开的登记号就不再开：再开一条会让上一份链接当场作废。
+        if _fresh_register(config)[0]:
+            logger.info("已有 10 分钟内签发的登记号 ⇒ 不重复开号推链接")
+            return {"status": "skip", "message": "已有有效登记号，不重复推送",
+                    "task_type": "打卡"}
+    else:
+        if sent_remind == slot or sent_link == slot:
+            logger.info(f"[{slot}] 本时段已提醒过/已推过链接 ⇒ 跳过重复提醒")
+            return {"status": "skip", "message": "本时段已推送过，跳过",
+                    "task_type": "打卡"}
+
     if not fallback:
         ok = _push_reminder(config, display_type)
+        if ok:
+            _mark_push_slot(config, "remindSentSlot", slot)
         return {"status": "skip",
                 "message": f"已推送{display_type}打卡提醒" if ok else "提醒推送失败",
                 "task_type": "打卡"}
@@ -268,8 +303,10 @@ def _run_remind_or_fallback(api_client, config, checkin_type: str,
                 "message": f"兜底链接生成失败: {str(exc)[:100]}",
                 "task_type": "打卡"}
     _mark_register(config, reg["outRegisterNo"], time.time())
-    _push_link(config, build_click_link(reg["registerUrl"]),
-               reg["outRegisterNo"], checkin_type, 1)
+    pushed = _push_link(config, build_click_link(reg["registerUrl"]),
+                        reg["outRegisterNo"], checkin_type, 1)
+    if pushed:
+        _mark_push_slot(config, "fallbackSentSlot", slot)
     return {"status": "skip",
             "message": f"已推送{display_type}补打链接，等本人扫脸后点按钮",
             "task_type": "打卡"}
