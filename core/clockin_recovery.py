@@ -98,7 +98,7 @@ def request_redispatch(kind, delay_sec=180, timeout=8):
     try:
         with urllib.request.urlopen(url, timeout=timeout) as rsp:
             body = rsp.read(300).decode("utf-8", "replace")
-            logger.warning(f"[REDISPATCH] 已请求 %d 秒后换机重派: {body}")
+            logger.warning(f"[REDISPATCH] 已请求 {delay_sec} 秒后换机重派: {body}")
             return True
     except Exception as exc:  # noqa: BLE001 - 重派失败不得影响主流程
         logger.warning(f"[REDISPATCH] 请求失败（忽略）: {exc}")
