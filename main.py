@@ -202,6 +202,68 @@ def _resolve_checkin_type(api_client) -> str:
     return hint
 
 
+def _push_reminder(config, display_type: str) -> bool:
+    """只发一条「该打卡了」的提醒：不含链接、不提交、不占 4 次提交预算。"""
+    try:
+        from util.MessagePush import MessagePusher
+
+        pusher = MessagePusher(config.get_value("config.pushNotifications") or [])
+        html = (
+            "<p><b>该打%s卡了</b></p>"
+            "<p>手机上打开工学云 App 直接打卡即可，几秒完成、不需要任何验证。</p>"
+            "<p>20 分钟后仍未打卡，我会自动再发一条支付宝授权链接兜底。</p>"
+            % display_type
+        )
+        pusher.push_custom("[提醒] 工学云%s打卡" % display_type, html, html)
+        try:
+            config._action_pushed = True   # 本次只推这一条，收尾不再重复推结果
+        except Exception:
+            pass
+        return True
+    except Exception as exc:  # noqa: BLE001 - 推送失败不得影响主流程
+        logger.warning(f"推送打卡提醒失败（忽略）: {exc}")
+        return False
+
+
+def _run_remind_or_fallback(api_client, config, checkin_type: str,
+                            display_type: str) -> Dict[str, Any]:
+    """「提醒 + 兜底」两模式：都不提交打卡，只用服务端状态决定要不要打扰本人。"""
+    fallback = bool(os.environ.get("CHECKIN_FALLBACK"))
+    today = datetime.now().date().isoformat()
+    try:
+        has = api_client.server_has_checkin(checkin_type, today)
+    except Exception as exc:  # noqa: BLE001 - 查不到按「未打卡」处理，宁可多提醒
+        logger.warning(f"查询服务端{display_type}卡失败，按未打卡处理: {str(exc)[:120]}")
+        has = None
+    if has:
+        logger.info(f"服务端已有{display_type}卡 ⇒ 无需动作"
+                    f"（{'fallback' if fallback else 'remind'}）")
+        return {"status": "skip",
+                "message": f"今日{display_type}卡已打，无需动作",
+                "task_type": "打卡"}
+
+    if not fallback:
+        ok = _push_reminder(config, display_type)
+        return {"status": "skip",
+                "message": f"已推送{display_type}打卡提醒" if ok else "提醒推送失败",
+                "task_type": "打卡"}
+
+    logger.info(f"服务端仍缺{display_type}卡 ⇒ 开登记号并推兜底链接（本次不提交）")
+    try:
+        reg = api_client.create_alipay_register()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"申请登记号失败: {exc}")
+        return {"status": "fail",
+                "message": f"兜底链接生成失败: {str(exc)[:100]}",
+                "task_type": "打卡"}
+    _mark_register(config, reg["outRegisterNo"], time.time())
+    _push_link(config, build_click_link(reg["registerUrl"]),
+               reg["outRegisterNo"], checkin_type, 1)
+    return {"status": "skip",
+            "message": f"已推送{display_type}补打链接，等本人扫脸后点按钮",
+            "task_type": "打卡"}
+
+
 def perform_clock_in(
     api_client: ApiClient,
     config: ConfigManager,
@@ -218,6 +280,14 @@ def perform_clock_in(
     # （用户规则：30 分钟内可把上下班都打完）
     state_key = "checkin_%s" % checkin_type
     logger.info(f"本次打卡类型：{checkin_type}（{display_type}）")
+
+    # 2026-10-30：304 实测证明 API 无法伪造官方客户端指纹（改 UA、点选验证码+appUuid 都仍 304），
+    # 而本人手机 App 打卡几秒完成、无任何验证 ⇒ 自动化改做「提醒 + 兜底」：
+    #   remind   08:25 / 17:25 只提醒，不提交，不吃提交预算
+    #   fallback 08:45 / 17:45 仍未打卡才开登记号并推授权链接
+    if os.environ.get("CHECKIN_REMIND") or os.environ.get("CHECKIN_FALLBACK"):
+        return _run_remind_or_fallback(api_client, config, checkin_type, display_type)
+
     # Stage 2 幂等保护：本地状态显示当日已成功则直接跳过（服务端检查仍保留兜底）
     if state_store and state_store.is_done(user_key, state_key):
         logger.info(f"本地状态显示今日「{state_key}」已完成，跳过")
