@@ -85,13 +85,17 @@ def _trigger_buttons(kind):
             % (retry_url, new_url))
 
 
-def request_redispatch(kind, delay_sec=180, timeout=8):
+def request_redispatch(kind, delay_sec=180, timeout=8, mode="auto"):
     """预检网络不可达时，请 ECS 稍后换一台 runner 重派。
 
     2026-10-28 实测：同一台 runner 连续 3 次 TCP 不可达（api.moguding.net:9000），
     但换一台 runner 立刻就通 ⇒ 单机的重试只能覆盖抖动，覆盖不了单机路由故障。
+
+    `mode` 必须原样带过去：否则 remind/fallback 的 run 换机后会被当成 auto 重新代打，
+    把「只提醒」变成「直接提交」（2026-10-30 实测踩过）。
     """
-    url = trigger_url(kind, "auto", "&d=%d" % max(60, min(900, int(delay_sec))))
+    url = trigger_url(kind, "auto", "&d=%d&m=%s"
+                      % (max(60, min(900, int(delay_sec))), mode))
     if not url:
         logger.warning("[REDISPATCH] 未配置 GX_TRIGGER_SECRET/BASE，跳过换机重派")
         return False
