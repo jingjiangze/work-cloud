@@ -174,6 +174,17 @@ def _report_exists_on_server(api_client: ApiClient, report_type: str,
     return False
 
 
+def _dispatch_mode() -> str:
+    """本次 run 的派发模式（换机重派时要原样带回去）。"""
+    for flag, name in (("CHECKIN_REMIND", "remind"),
+                       ("CHECKIN_FALLBACK", "fallback"),
+                       ("CHECKIN_FORCE_NEW", "new"),
+                       ("CHECKIN_RETRY_ONLY", "retry")):
+        if os.environ.get(flag):
+            return name
+    return "auto"
+
+
 def _checkin_type_hint() -> str:
     """本次要打的是上班还是下班卡：CHECKIN_TYPE 显式指定优先，否则按小时推断。"""
     forced = (os.environ.get("CHECKIN_TYPE") or "").strip().upper()
@@ -948,7 +959,9 @@ def run(config: ConfigManager,
                 # 单机重试只能覆盖抖动，覆盖不了这台机器的出口路由故障。
                 try:
                     if "网络不可达" in report.summary():
-                        request_redispatch(_checkin_type_hint())
+                        # mode 必须原样带回：否则「只提醒 / 只兜底」的 run 换机后
+                        # 会被当成 auto 重新代打（2026-10-30 实测踩过）。
+                        request_redispatch(_checkin_type_hint(), mode=_dispatch_mode())
                 except Exception as exc:  # noqa: BLE001 - 重派失败不影响判定
                     logger.warning(f"[REDISPATCH] 跳过: {exc}")
                 results.append({
