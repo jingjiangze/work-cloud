@@ -64,7 +64,7 @@ jobs:
           cache: "pip"
 
       - name: Cache pip packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -75,7 +75,7 @@ jobs:
       # runner 是临时 VM，`data/` 与 `user/` 不持久 ⇒ 本地幂等门禁永远不命中、
       # 304 拿到的登记号跑完即丢。这里用 cache 把它们跨运行带过去。
       - name: Restore state
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             data
@@ -149,7 +149,7 @@ jobs:
 
       - name: Save state
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             data
