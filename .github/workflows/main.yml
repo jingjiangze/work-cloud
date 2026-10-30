@@ -13,7 +13,7 @@ on:
           - START
           - END
       mode:
-        description: "auto=按需申请登记号并推链接；new=强制申请新登记号并推链接；retry=只做一次提交（不推链接）"
+        description: "remind=只提醒不提交；fallback=仍未打卡才推兜底链接；auto=按需申请登记号并推链接；new=强制申请新登记号并推链接；retry=只做一次提交（不推链接）"
         required: false
         default: "auto"
         type: choice
@@ -21,6 +21,8 @@ on:
           - auto
           - new
           - retry
+          - remind
+          - fallback
       origin:
         description: "触发来源：user=本人点了 PushPlus 按钮（人在手机前），timer=ECS 定时器/自动重派"
         required: false
@@ -135,6 +137,9 @@ jobs:
           CHECKIN_FORCE_NEW: ${{ github.event.inputs.mode == 'new' && '1' || '' }}
           # 本人点了按钮（而不是定时器）⇒ 人就在手机前，登记号失效时可以当场补发新链接
           CHECKIN_USER_TAP: ${{ github.event.inputs.origin == 'user' && '1' || '' }}
+          # 「提醒 + 兜底」：两种模式都不提交打卡，只用服务端状态决定要不要打扰本人
+          CHECKIN_REMIND: ${{ github.event.inputs.mode == 'remind' && '1' || '' }}
+          CHECKIN_FALLBACK: ${{ github.event.inputs.mode == 'fallback' && '1' || '' }}
           # Linux 上 USER 默认是 runner，main.py 会拿它当 JSON 解析并刷一条错误日志；
           # 显式置空让它走 user/*.json 那条路（也是唯一会回写登记号的路径）。
           USER: ""
