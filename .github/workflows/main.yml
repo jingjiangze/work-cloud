@@ -163,14 +163,14 @@ jobs:
                   with open(path, "w", encoding="utf-8") as fh:
                       json.dump(cur, fh, ensure_ascii=False, indent=2)
                   updated += 1
-                  print("updated", name, mask(phone))
+                  print("updated account", mask(phone))
               else:
                   fname = "acc_%s.json" % phone
                   with open(os.path.join(USER_DIR, fname), "w", encoding="utf-8") as fh:
                       json.dump(acc, fh, ensure_ascii=False, indent=2)
                   index[phone] = fname
                   added += 1
-                  print("added", fname, mask(phone))
+                  print("added account", mask(phone))
           print("账号同步完成: added=%d updated=%d total=%d" % (added, updated, len(index)))
           PY
 
