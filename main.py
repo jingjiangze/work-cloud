@@ -201,6 +201,12 @@ def _resolve_checkin_type(api_client) -> str:
         today = datetime.now().date().isoformat()
         if not api_client.server_has_checkin("START", today):
             logger.info(f"服务端今日缺上班卡 ⇒ 优先补上班（原判定 {hint}）")
+            # 2026-11-05 风控收敛：把这次查询结果挂到 client 上，提醒/兜底路径直接复用，
+            # 下午的两个 timer 每次少一次 listSynchro（同一个 run 内不会过期）。
+            try:
+                api_client._start_missing_today = today
+            except Exception:
+                pass
             return "START"
     except Exception as exc:  # noqa: BLE001 - 查不到就按原判定走，别阻断打卡
         logger.warning(f"查询服务端上班卡失败，按原判定 {hint} 继续: {str(exc)[:100]}")
@@ -244,11 +250,15 @@ def _run_remind_or_fallback(api_client, config, checkin_type: str,
     """「提醒 + 兜底」两模式：都不提交打卡，只用服务端状态决定要不要打扰本人。"""
     fallback = bool(os.environ.get("CHECKIN_FALLBACK"))
     today = datetime.now().date().isoformat()
-    try:
-        has = api_client.server_has_checkin(checkin_type, today)
-    except Exception as exc:  # noqa: BLE001 - 查不到按「未打卡」处理，宁可多提醒
-        logger.warning(f"查询服务端{display_type}卡失败，按未打卡处理: {str(exc)[:120]}")
-        has = None
+    if checkin_type == "START" and getattr(api_client, "_start_missing_today", "") == today:
+        logger.info("复用本 run 内已查过的结果：服务端缺上班卡")
+        has = False
+    else:
+        try:
+            has = api_client.server_has_checkin(checkin_type, today)
+        except Exception as exc:  # noqa: BLE001 - 查不到按「未打卡」处理，宁可多提醒
+            logger.warning(f"查询服务端{display_type}卡失败，按未打卡处理: {str(exc)[:120]}")
+            has = None
     if has:
         logger.info(f"服务端已有{display_type}卡 ⇒ 无需动作"
                     f"（{'fallback' if fallback else 'remind'}）")
@@ -402,13 +412,18 @@ def perform_clock_in(
         logger.info(f"用户 {user_name} 开始 {display_type} 打卡")
 
         # 打卡图片和备注
-        attachments = upload_img(
-            api_client.get_upload_token(),
-            config.get_value("userInfo.orgJson.snowFlakeId"),
-            config.get_value("userInfo.userId"),
-            config.get_value("config.clockIn.imageCount"),
-            user_key=user_key,
-        )
+        # 2026-11-05 风控收敛：没有图片时不白拿上传令牌（每次少一个业务 POST）
+        _img_n = int(config.get_value("config.clockIn.imageCount") or 0)
+        if _img_n > 0:
+            attachments = upload_img(
+                api_client.get_upload_token(),
+                config.get_value("userInfo.orgJson.snowFlakeId"),
+                config.get_value("userInfo.userId"),
+                _img_n,
+                user_key=user_key,
+            )
+        else:
+            attachments = None
 
         description_list = config.get_value("config.clockIn.description")
         description = random.choice(description_list) if description_list else None
@@ -642,13 +657,18 @@ def _submit_report_common(
                 logger.warning("重新生成后仍相似，已附加报告日期区分内容")
 
         # 上传图片
-        attachments = upload_img(
-            api_client.get_upload_token(),
-            config.get_value("userInfo.orgJson.snowFlakeId"),
-            config.get_value("userInfo.userId"),
-            config.get_value(image_count_key),
-            user_key=user_key,
-        )
+        # 2026-11-05 风控收敛：同上，报告没配图就不取上传令牌
+        _img_n = int(config.get_value(image_count_key) or 0)
+        if _img_n > 0:
+            attachments = upload_img(
+                api_client.get_upload_token(),
+                config.get_value("userInfo.orgJson.snowFlakeId"),
+                config.get_value("userInfo.userId"),
+                _img_n,
+                user_key=user_key,
+            )
+        else:
+            attachments = None
 
         report_info = {
             "title": title,
