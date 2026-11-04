@@ -122,19 +122,12 @@ def _resolve_submit(submit_fn, verify_fn, task_label: str,
             record_event(user_key, task_label, EVENT_SUBMIT_UNKNOWN,
                          stage="verify", action="判定成功", result="服务端已存在记录")
             return "success", f"{task_label}提交结果未知但服务端已存在记录，判定成功"
-        logger.warning(f"{task_label}服务端无记录，执行最多一次补偿提交")
+        # 2026-11-05 风控收敛：提交结果未知时再补一次写提交，等于把一次写放大成两次，
+        # 而服务端本来就没有记录说明请求多半没到。改为只读核验后如实上报。
+        logger.warning(f"{task_label}服务端无记录，按规则不再补偿提交（避免重复写）")
         record_event(user_key, task_label, EVENT_SUBMIT_UNKNOWN,
-                     stage="verify", action="补偿提交(最多一次)", result="服务端无记录")
-        try:
-            submit_fn()
-        except SubmitUnknownError as e2:
-            record_event(user_key, task_label, EVENT_SUBMIT_UNKNOWN,
-                         stage="compensate", action="停止(不循环)", result=str(e2))
-            return "unknown", f"{task_label}补偿提交结果仍未知，按规则停止: {e2}"
-        except Exception as e2:  # noqa: BLE001
-            return "fail", f"{task_label}补偿提交失败: {e2}"
-        logger.info(f"{task_label}补偿提交成功")
-        return "success", f"{task_label}补偿提交成功"
+                     stage="verify", action="放弃补偿提交", result="服务端无记录")
+        return "unknown", f"{task_label}提交结果未知且服务端无记录（已放弃补偿提交）"
     except Exception as e:  # noqa: BLE001
         return "fail", f"{task_label}提交失败: {e}"
     # 明确成功 → 只读核验（advisory，不改变判定）
@@ -450,27 +443,11 @@ def perform_clock_in(
                     user_key, state_key, success_state_for(state_key),
                     submit_message,
                 )
-            # CHECKIN_BOTH=1：本账号允许在 30 分钟内把上/下班都打完。
-            # 成功一次后若服务端还缺另一张卡，就用同一登记号立刻补打。
-            if os.environ.get("CHECKIN_BOTH") and                     config.get_value("userInfo.userType") != "teacher":
-                _other = "END" if checkin_type == "START" else "START"
-                _other_label = "下班" if _other == "END" else "上班"
-                try:
-                    if not api_client.server_has_checkin(
-                            _other, current_time.date().isoformat()):
-                        # 2026-10-28 实测：一个登记号只能用一次（复用打第二张直接「验证已过期」）。
-                        # 所以为第二张卡申请**新**登记号并推链接，本人再扫一次即可。
-                        logger.info(f"[BOTH] 服务端缺「{_other_label}」卡 ⇒ 申请新登记号并推链接")
-                        _reg = api_client.create_alipay_register()
-                        _mark_register(config, _reg["outRegisterNo"], time.time())
-                        _push_link(config, build_click_link(_reg["registerUrl"]),
-                                   _reg["outRegisterNo"], _other, 1)
-                        logger.info(f"[BOTH] 已推送「{_other_label}」卡的授权链接，"
-                                    f"等本人扫码后由 retry 补打")
-                    else:
-                        logger.info(f"[BOTH] 服务端已有「{_other_label}」卡，无需补打")
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"[BOTH] 为「{_other_label}」卡申请登记号失败（忽略）: {str(exc)[:120]}")
+            # 2026-11-05 风控收敛：CHECKIN_BOTH 会在成功一次后再开一个登记号，
+            # 而新登记号会让上一条链接当场作废（历史踩过「链接打架」）。整段停用，
+            # 需要打另一张卡时由本人点按钮或由下一次提醒/兜底处理。
+            if os.environ.get("CHECKIN_BOTH"):
+                logger.info("[BOTH] CHECKIN_BOTH 已按风控收敛停用（不再自动开第二个登记号）")
             return {
                 "status": "success",
                 "message": f"{display_type}打卡成功",
