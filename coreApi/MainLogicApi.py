@@ -184,11 +184,20 @@ class ApiClient:
                 # Token失效处理
                 if "token失效" in msg:
                     if attempt < self.max_retries - 1:
+                        # 2026-11-05 风控收敛：登录是「建会话」写操作，且每次 login() 内部还会
+                        # 打 2~10 个验证码请求。同一进程只允许自动重登 1 次；login() 内部的
+                        # 嵌套调用由 _logging_in 阻断，避免递归放大。
+                        if getattr(self, "_relogin_count", 0) >= 1 or getattr(self, "_logging_in", False):
+                            raise ValueError(msg)
+                        self._relogin_count = getattr(self, "_relogin_count", 0) + 1
                         wait_time = 1 * (2 ** attempt)
-                        logger.warning(f"Token失效，正在重新登录... (等待 {wait_time}s)")
+                        logger.warning(f"Token失效，正在重新登录（本进程仅此一次）... (等待 {wait_time}s)")
                         time.sleep(wait_time)
-                        
-                        self.login()
+                        self._logging_in = True
+                        try:
+                            self.login()
+                        finally:
+                            self._logging_in = False
                         # 更新headers中的authorization
                         headers["authorization"] = self.config.get_value("userInfo.token")
                         continue
@@ -198,10 +207,17 @@ class ApiClient:
                 # server intermittently rejects with "please download the latest APP"
                 # (cluster nodes disagree on the minimum version): re-login and retry
                 if "最新版本" in msg and attempt < self.max_retries - 1:
+                    if getattr(self, "_relogin_count", 0) >= 1 or getattr(self, "_logging_in", False):
+                        raise ValueError(msg)
+                    self._relogin_count = getattr(self, "_relogin_count", 0) + 1
                     wait_time = 1 * (2 ** attempt)
                     logger.warning(f"server requires latest APP (intermittent), re-login and retry in {wait_time}s")
                     time.sleep(wait_time)
-                    self.login()
+                    self._logging_in = True
+                    try:
+                        self.login()
+                    finally:
+                        self._logging_in = False
                     headers["authorization"] = self.config.get_value("userInfo.token")
                     continue
                 raise ValueError(msg)
@@ -526,8 +542,10 @@ class ApiClient:
             ts = 0
         if not ts:
             return None          # 没有签发时间无法判断有效期 ⇒ 不冒险携带
-        if (time.time() - ts) >= 1800:
-            return None          # 已过 30 分钟
+        # 2026-11-05：平台侧登记号实测 08:26 签发、08:35 即「验证已过期」，名义 30 分钟不可信。
+        # 携带过期号提交本身就是一次风控事件，所以本地只认 10 分钟（与 REGISTER_TTL_SEC 对齐）。
+        if (time.time() - ts) >= 600:
+            return None          # 已过 10 分钟
         return no
 
     def create_alipay_register(self) -> Dict[str, str]:
@@ -636,26 +654,11 @@ class ApiClient:
             response = retry_response
 
         if str(response.get("msg")) == "304":
-            # 304 = 需要安全验证。**官方 App 走的是「点选验证码 + appUuid」，不需要本人扫脸**；
-            # 之前我们直接跳去支付宝授权闭环，等于绕了一条最难的路。
-            # 2026-10-30 起先试这条路（公开在用的实现同一做法），不行再回落支付宝授权。
-            logger.warning("304 安全验证 ⇒ 先试点选验证码 + appUuid（官方客户端路径）")
-            try:
-                _cw = self.solve_click_word_captcha()
-            except Exception as exc:  # noqa: BLE001 - 交回上层走支付宝授权兜底
-                raise RiskVerificationRequired(
-                    f"打卡未提交（304 且点选验证码未通过: {str(exc)[:80]}）")
-            data["appUuid"] = _cw["clientUid"]
-            data["captcha"] = _cw["captcha"]
-            rsp2 = self._post_request(url, headers, data, submit=True,
-                                      allow_302=True, allow_304=True)
-            if str(rsp2.get("msg")) == "304":
-                detail = str(rsp2.get("data") or "")[:200]
-                raise RiskVerificationRequired(
-                    f"打卡未提交（点选验证码后仍 304）: {detail}")
-            if rsp2.get("msg") == "302":
-                raise CaptchaExhaustedError("304 之后仍被要求行为验证码，熔断")
-            logger.info("304 已用点选验证码解除，打卡完成")
+            # 2026-11-05 风控收敛：304 = 账号级「非官方客户端」标记。
+            # 2026-10-30 实测「点选验证码 + appUuid」重提仍 304（同一天手机 App 零验证可打），
+            # 所以这里不再发第二次写提交，直接把结论交回上层走「提醒 + 兜底」的人工链路。
+            detail = str(response.get("data") or "")[:200]
+            raise RiskVerificationRequired(f"打卡未提交（304 账号级风控）: {detail}")
 
     def submit_clock_in_replace(self, checkin_info: Dict[str, Any]) -> Dict[str, Any]:
         """提交补卡（attendence/attendanceReplace/v6/save）。
