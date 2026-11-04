@@ -84,36 +84,94 @@ jobs:
           restore-keys: |
             state-
 
-      # 首次运行（或缓存丢失）时，把 secret 里的账号播种成 user/*.json。
+      # 把 secret 里的账号同步进 user/*.json（按手机号合并）：已存在的账号只更新
+      # 面板可控字段，保留 token / outRegisterNo / remindSentSlot 等 runtime 键；
+      # 新增账号写成 user/acc_<phone>.json。这样面板「保存（写入 GitHub Secret）」后
+      # 下一次 dispatch 就能真的多跑一个账号，不需要清缓存重新播种。
       # 之所以不再用 USER 环境变量：ConfigManager 在 env 来源下 path=None，
       # **不回写**，outRegisterNo / 经纬偏移就永远存不下来。
-      - name: Seed account config from secret
+      - name: Sync account config from secret
         env:
           USER_JSON: ${{ secrets.USER }}
         run: |
           python - <<'PY'
           import json, os, sys
+
+          USER_DIR = "user"
+          os.makedirs(USER_DIR, exist_ok=True)
+          files = [f for f in os.listdir(USER_DIR)
+                   if f.endswith(".json") and not f.startswith("example")]
+
+          def load(p):
+              with open(p, encoding="utf-8") as fh:
+                  return json.load(fh)
+
+          def phone_of(cfg):
+              u = ((cfg or {}).get("config") or {}).get("user") or {}
+              return str(u.get("phone") or "").strip()
+
+          def mask(phone):
+              return (phone[:3] + "***" + phone[-2:]) if len(phone) > 5 else "***"
+
+          index = {}
+          for f in files:
+              try:
+                  index[phone_of(load(os.path.join(USER_DIR, f)))] = f
+              except Exception as exc:
+                  print("跳过无法解析的配置:", f, exc)
+
           raw = (os.environ.get("USER_JSON") or "").strip()
-          existing = [f for f in os.listdir("user")
-                      if f.endswith(".json") and not f.startswith("example")] \
-              if os.path.isdir("user") else []
-          if existing:
-              print("已有账号配置，跳过播种:", existing)
-              sys.exit(0)
           if not raw:
-              sys.exit("secrets.USER 为空，无法播种账号")
+              if not files:
+                  sys.exit("secrets.USER 为空且本地无账号配置，无法播种")
+              print("无 USER secret，沿用本地配置:", files)
+              sys.exit(0)
           try:
               accounts = json.loads(raw)
           except Exception as exc:
               sys.exit("secrets.USER 不是合法 JSON: %s" % exc)
-          if not accounts:
+          if not isinstance(accounts, list) or not accounts:
               sys.exit("secrets.USER 为空数组")
-          os.makedirs("user", exist_ok=True)
-          for i, acc in enumerate(accounts, 1):
-              p = os.path.join("user", "acc%d.json" % i)
-              with open(p, "w", encoding="utf-8") as fh:
-                  json.dump(acc, fh, ensure_ascii=False, indent=2)
-              print("seeded", p)
+
+          # 按手机号合并：已存在的账号只同步面板可控字段，保留 runtime 键（token / outRegisterNo / remindSentSlot 等）
+          added = updated = 0
+          for acc in accounts:
+              phone = phone_of(acc)
+              if not phone:
+                  print("跳过无手机号的账号条目")
+                  continue
+              src_cfg = acc.get("config") or {}
+              name = index.get(phone)
+              if name:
+                  path = os.path.join(USER_DIR, name)
+                  cur = load(path)
+                  cfg = cur.setdefault("config", {})
+                  cfg.setdefault("user", {})["password"] = (src_cfg.get("user") or {}).get("password", "")
+                  s_clock = src_cfg.get("clockIn") or {}
+                  d_clock = cfg.setdefault("clockIn", {})
+                  for k in ("enabled", "mode", "location", "imageCount",
+                            "description", "specialClockIn", "customDays"):
+                      if k in s_clock:
+                          d_clock[k] = s_clock[k]
+                  d_rep = cfg.setdefault("reportSettings", {})
+                  for k, v in (src_cfg.get("reportSettings") or {}).items():
+                      d_rep[k] = v
+                  if "ai" in src_cfg:
+                      cfg["ai"] = src_cfg["ai"]
+                  if "pushNotifications" in src_cfg:
+                      cfg["pushNotifications"] = src_cfg["pushNotifications"]
+                  with open(path, "w", encoding="utf-8") as fh:
+                      json.dump(cur, fh, ensure_ascii=False, indent=2)
+                  updated += 1
+                  print("updated", name, mask(phone))
+              else:
+                  fname = "acc_%s.json" % phone
+                  with open(os.path.join(USER_DIR, fname), "w", encoding="utf-8") as fh:
+                      json.dump(acc, fh, ensure_ascii=False, indent=2)
+                  index[phone] = fname
+                  added += 1
+                  print("added", fname, mask(phone))
+          print("账号同步完成: added=%d updated=%d total=%d" % (added, updated, len(index)))
           PY
 
       - name: Install dependencies
