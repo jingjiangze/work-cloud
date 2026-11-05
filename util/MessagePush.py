@@ -56,6 +56,10 @@ class MessagePusher:
             level = "INFO" if fail_count == 0 and success_count == len(results)                 else ("ERROR" if fail_count else "WARNING")
         status_emoji = "🎉" if success_count == len(results) else "📊"
         title = f"{status_emoji} [{level}] 工学云报告 ({success_count}/{len(results)})"
+        # 2026-11-05：同一类型多条目时按顺序尝试、第一个成功即停。
+        # 用途：账号自己的 PushPlus token 未实名（平台回 905）时自动回落到全局 token，
+        # 成功一次后不再往下发，避免重复打扰。
+        _pp_done = False
         for service_config in self.push_config:
             if service_config.get("enabled", False):
                 service_type = service_config["type"]
@@ -67,8 +71,11 @@ class MessagePusher:
                         content = self._generate_markdown_message(results)
                         self._server_push(service_config, title, content)
                     elif service_type == "PushPlus":
+                        if _pp_done:
+                            continue
                         content = self._generate_html_message(results)
                         self._pushplus_push(service_config, title, content)
+                        _pp_done = True
                     elif service_type == "AnPush":
                         content = self._generate_markdown_message(results)
                         self._anpush_push(service_config, title, content)
@@ -96,6 +103,7 @@ class MessagePusher:
             level: 通知等级 INFO/WARNING/ERROR。
         """
         html = html or markdown
+        _pp_done = False      # 同类型多条目：按顺序试，第一个成功即停（见 push 的注释）
         for service_config in self.push_config:
             if not service_config.get("enabled", False):
                 continue
@@ -105,8 +113,12 @@ class MessagePusher:
                     getattr(self, f"_{service_type.lower()}_push")(
                         service_config, title, markdown)
                 elif service_type in ("PushPlus", "WxPusher", "SMTP"):
+                    if service_type == "PushPlus" and _pp_done:
+                        continue
                     getattr(self, f"_{service_type.lower()}_push")(
                         service_config, title, html)
+                    if service_type == "PushPlus":
+                        _pp_done = True
                 else:
                     logger.warning(f"不支持的推送服务类型: {service_type}")
             except Exception as e:
