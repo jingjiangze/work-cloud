@@ -12,7 +12,7 @@ name: dsh-market-tick
 # (`:17` crawl, `:37` translate, `:47` sync-check).
 on:
   schedule:
-    - cron: '23 */3 * * *'
+    - cron: '23 */2 * * *'
   workflow_dispatch:
 
 permissions:
