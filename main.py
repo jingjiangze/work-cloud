@@ -992,7 +992,13 @@ def run(config: ConfigManager,
                 # 同一台 runner 连续 3 次不可达 ⇒ 请 ECS 换一台 runner 重派：
                 # 单机重试只能覆盖抖动，覆盖不了这台机器的出口路由故障。
                 try:
-                    if "网络不可达" in report.summary():
+                    # 2026-11-05：多账号时每个账号都会走到这里，一次网络失败会派发 N 次。
+                    # 实测 08:45 那班失败后，08:50 同时起了两个一模一样的 fallback run。
+                    # 每个进程只派一次；重复的那份由「本时段已推送」闸门兜住。
+                    if "网络不可达" in report.summary() and os.environ.get("_GX_REDISPATCH_SENT"):
+                        logger.info("[REDISPATCH] 本 run 已派发过换机重试 ⇒ 跳过重复派发")
+                    elif "网络不可达" in report.summary():
+                        os.environ["_GX_REDISPATCH_SENT"] = "1"
                         # mode 必须原样带回：否则「只提醒 / 只兜底」的 run 换机后
                         # 会被当成 auto 重新代打（2026-10-30 实测踩过）。
                         request_redispatch(_checkin_type_hint(), mode=_dispatch_mode())
