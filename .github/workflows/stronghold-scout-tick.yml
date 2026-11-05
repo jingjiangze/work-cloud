@@ -1,0 +1,93 @@
+name: stronghold-scout-tick
+
+# 采集流水线的闹钟（原先独立在 jingjiangze/stronghold-tick，2026-11-05 并到这里）
+#
+# 背景：GitHub 对私密仓的 `schedule` 命中率实测很差 —— stronghold-scout 装上
+# `13 * * * *` 之后，期望约 13 个整点只真正跑了 2 个（连 run 都没创建，queued=0、
+# workflow `active`）。而同一个仓的 `workflow_dispatch` 每次都在几秒内起跑。
+# scout 自己会「缺勤补投一轮」，但那只能补一格，持续节拍得靠另一个仓的定时打点。
+#
+# 判定逻辑（与原仓一致）：
+#   1. 读 stronghold-scout 最近一轮 scout-schedule 的起跑时间；
+#   2. 距今 < QUIET_MIN（690 分钟 = 11.5 小时）就静默跳过，避免同一天跑两轮；
+#   3. 否则 dispatch 一轮采集。
+#
+# 需要的 secret：SCOUT_TICK_TOKEN —— 对 jingjiangze/stronghold-scout 有 Actions: write。
+on:
+  schedule:
+    - cron: '7 * * * *'   # 刻意错开 scout 自己的 :13
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '无视静默窗，强行拉一轮'
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: stronghold-scout-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Poke stronghold-scout
+        env:
+          TICK_TOKEN: ${{ secrets.SCOUT_TICK_TOKEN }}
+          FORCE: ${{ github.event.inputs.force == 'true' && '1' || '' }}
+          QUIET_MIN: '690'
+        run: |
+          cat > tick.mjs <<'JS'
+          const H = (t) => ({ authorization: 'Bearer ' + t, accept: 'application/vnd.github+json',
+            'user-agent': 'work-cloud-tick', 'content-type': 'application/json' });
+          const TOK = process.env.TICK_TOKEN || '';
+          const TARGET = 'jingjiangze/stronghold-scout';
+          const SELF = 'jingjiangze/work-cloud';
+          const QUIET = Number(process.env.QUIET_MIN || 690);
+          const ageMin = (iso) => (Date.now() - Date.parse(String(iso).replace(/Z$/, '') + 'Z')) / 60000;
+          const md = [];
+          const note = (s) => { console.log(s); md.push(s); };
+          if (!TOK) { note('FAIL: 没配 SCOUT_TICK_TOKEN，闹钟空转'); process.exit(1); }
+
+          const runs = async (repo) => {
+            const r = await fetch(`https://api.github.com/repos/${repo}/actions/runs?per_page=20`,
+              { headers: H(TOK), signal: AbortSignal.timeout(25000) });
+            if (!r.ok) throw new Error(`${repo} 读 run 列表 HTTP ${r.status}`);
+            return ((await r.json()).workflow_runs || []);
+          };
+
+          const scoutRuns = (await runs(TARGET)).filter((r) => /scout-schedule/.test(r.path || ''));
+          const last = scoutRuns[0];
+          const gap = last ? ageMin(last.created_at) : Infinity;
+          const hits24h = scoutRuns.filter((r) => ageMin(r.created_at) < 1440).length;
+
+          let myScheduled = 0;
+          try {
+            const mine = await runs(SELF);
+            myScheduled = mine.filter((r) => r.event === 'schedule' && ageMin(r.created_at) < 1440).length;
+          } catch { /* 读不到就算了 */ }
+
+          if (process.env.FORCE === '1') {
+            note(`FORCE：距上一轮 ${Math.round(gap)} 分钟，仍然补拉`);
+          } else if (gap < QUIET) {
+            note(`静默窗：上一轮采集 ${Math.round(gap)} 分钟前才起跑（阈值 ${QUIET} 分钟），本轮不重复拉`);
+            process.exit(0);
+          } else {
+            note(`距上一轮采集 ${Math.round(gap)} 分钟 ≥ ${QUIET} → 拉一轮`);
+          }
+
+          const res = await fetch(`https://api.github.com/repos/${TARGET}/actions/workflows/scout-schedule.yml/dispatches`, {
+            method: 'POST', headers: H(TOK), signal: AbortSignal.timeout(25000),
+            body: JSON.stringify({ ref: 'main', inputs: { target: 'crawl', dry: false, pages: '', forks: '', tick_min: '' } }),
+          });
+          const ok = res.status === 204;
+          note(`${ok ? 'OK' : 'FAIL'}: dispatch http=${res.status}${ok ? '' : ' ' + (await res.text().catch(() => '')).slice(0, 200)}`);
+          note(`近 24 小时：scout 采集 ${hits24h} 轮 | 闹钟自己 schedule ${myScheduled}/24 次命中`);
+          const fs = await import('node:fs');
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
+          if (!ok) process.exit(1);
+          JS
+          node tick.mjs
