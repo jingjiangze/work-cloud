@@ -1,0 +1,67 @@
+name: dsh-market-tick
+
+# Why this lives here
+# -------------------
+# GitHub's scheduler is best-effort: on 2026-11-05 every cron in
+# jingjiangze/dsh-market was skipped for ~10 hours while all workflows stayed
+# `active`, so that catalogue silently went stale. This repository's own cron
+# (proxy-manifest.yml) demonstrably fires — the last 20 recorded runs were all
+# `schedule` events — so borrowing its scheduling slot keeps dsh-market fresh.
+#
+# :23 every three hours does not collide with dsh-market's own crons
+# (`:17` crawl, `:37` translate, `:47` sync-check).
+on:
+  schedule:
+    - cron: '23 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-market-tick
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch the catalogue crawl
+        env:
+          TOKEN: ${{ secrets.DSH_MARKET_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::DSH_MARKET_TOKEN is not set on this repository"
+            exit 1
+          fi
+          code=$(curl -sS -o /tmp/body -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/jingjiangze/dsh-market/actions/workflows/crawl.yml/dispatches \
+            -d '{"ref":"main"}')
+          echo "crawl dispatch -> HTTP $code"
+          cat /tmp/body
+          test "$code" = "204"
+
+      - name: Show the latest crawl runs
+        env:
+          TOKEN: ${{ secrets.DSH_MARKET_TOKEN }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          curl -sS -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+            'https://api.github.com/repos/jingjiangze/dsh-market/actions/workflows/crawl.yml/runs?per_page=3' \
+            -o /tmp/runs.json
+          {
+            echo '### dsh-market crawl runs'
+            echo '```'
+            python3 -c "
+          import json
+          for run in json.load(open('/tmp/runs.json')).get('workflow_runs', [])[:3]:
+              print(f\"{run['event']:18} {run['status']:10} {run['conclusion'] or '-':10} {run['created_at']}\")
+          "
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
