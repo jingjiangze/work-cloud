@@ -33,9 +33,10 @@ logger = logging.getLogger(__name__)
 class TerminalPunchError(Exception):
     """自动化无法继续的终态错误（如人脸核验），不再重试。"""
 
-POLL_ATTEMPTS = 0    # **不轮询**：实测每次提交都触发一次服务端人脸比对，
-                     # 连续 4 次失败平台就把验证作废 ⇒ 只提交一次，等本人扫完由 retry 任务补提交
-POLL_INTERVAL = 180
+POLL_ATTEMPTS = 3    # 2026-11-08 用户令：扫脸后**自动**提交，不依赖手动按钮。
+                     # 窗口 = 3 × 150s = 7.5 分钟（实测登记号平台侧只活 ~9 分钟）；
+                     # 盲提交必须 ≤3 次：实测连续 4 次失败平台就把验证作废。
+POLL_INTERVAL = 150
 REGISTER_TTL_SEC = 10 * 60      # 平台侧真正可提交的窗口远短于名义 30 分钟：
                                  # 2026-10-29 实测 08:26 签发、08:35 提交已回「验证已过期」。
                                  # 超过 10 分钟就当它已死，别再去撞——撞一次就烧掉 4 次提交预算中的一次。
@@ -368,11 +369,14 @@ def submit_with_recovery(
         return rsp, attempt
     if not face_seen:
         raise RiskVerificationRequired(
-            "已推送授权链接；本轮按设计不轮询（避免打死验证），"
-            "等本人扫码后由 08:35/08:52 的 retry 任务补提交")
+            "扫码窗口内未检测到扫脸；链接在登记号有效期内仍可扫，"
+            "扫完点「我已扫完，立即补打」即可（每日仅试一次，不重复申请新号）")
     _push_face_notice(config)
     if expired:
         logger.warning("验证已被平台作废 ⇒ 本次不尝试补卡（省额度），等下次重新申请登记号")
         raise RiskVerificationRequired("打卡失败：人脸核验导致验证作废（本次未消耗补卡额度）")
-    resp = _try_makeup(api_client, dict(checkin_info, outRegisterNo=register_no), config)
-    return resp, attempt
+    # 2026-11-08 用户令「每天只试一次」：扫码窗口耗尽（未扫）不再自动补卡，
+    # 也不开第二个登记号——链接在 TTL 内仍可扫，扫完点按钮补打；否则明天再来。
+    raise RiskVerificationRequired(
+        "扫码窗口已过（%d 次盲提交均未见扫脸）；链接在登记号有效期内仍可扫码，"
+        "扫完点「我已扫完，立即补打」" % attempt)
