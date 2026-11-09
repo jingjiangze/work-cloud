@@ -584,8 +584,9 @@ Start-Process python -ArgumentList "scheduled_runner.py" -WindowStyle Hidden
 
 ## 许可证
 
-本项目采用 Apache 2.0 许可。详细信息请参阅 [LICENSE](https://github.com/Rensr0/AutoMoGuDingCheckIn/blob/main/LICENSE)
-文件。
+本仓库（含维护者后续改动与新增功能）以 **GNU General Public License v3.0 或更新版本**（`GPL-3.0-or-later`）发布，全文见根目录 [`LICENSE`](LICENSE)。
+
+上游 [Rockytkg/AutoMoGuDingCheckIn](https://github.com/Rockytkg/AutoMoGuDingCheckIn) 采用 Apache 2.0。Apache 2.0 与 GPL-3.0 单向兼容，故本仓库可在保留原作者署名与许可声明的前提下整体以 GPL-3.0 分发；再分发时必须同时保留上游的版权与许可声明。
 
 ## 联系方式
 
